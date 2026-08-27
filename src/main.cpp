@@ -1,6 +1,6 @@
-#define BLYNK_TEMPLATE_ID "TMPL6AgsBMKHP"     // Ganti dengan Template ID Blynk kamu
+#define BLYNK_TEMPLATE_ID "TMPL6AgsBMKHP"
 #define BLYNK_TEMPLATE_NAME "yang ini terakhir abmas yang bener aja"
-#define BLYNK_AUTH_TOKEN "3LXJ9hxnURfimXdVz4TVbFnzmPauZU-y"  // Ganti dengan Auth Token Blynk kamu
+#define BLYNK_AUTH_TOKEN "3LXJ9hxnURfimXdVz4TVbFnzmPauZU-y"
 
 #define BLYNK_PRINT Serial
 #include <WiFi.h>
@@ -15,41 +15,36 @@ RTC_DS1307 rtc;
 
 #define SDA_PIN 41
 #define SCL_PIN 40
-#define BTN_NAV_PIN 38     // Tombol Biru: Reset / Standby
-#define BTN_SELECT_PIN 39  // Tombol Hijau: Start / Mulai Sistem
+#define BTN_NAV_PIN 38
+#define BTN_SELECT_PIN 39
 #define RELAY_PIN 36
 #define LED_PIN 35
 #define BUZZER_PIN 42
 
-// WiFi Credential untuk Blynk
-char auth[] = BLYNK_AUTH_TOKEN; // Ganti dengan Auth Token Blynk kamu
-char ssid[] = "Wokwi-GUEST";     // Ganti SSID WiFi/Hotspot
-char pass[] = ""; // Ganti Password WiFi
+char auth[] = BLYNK_AUTH_TOKEN;
+char ssid[] = "Wokwi-GUEST";
+char pass[] = "";
 
-// =========================================================================
-// AKSELERASI SIMULASI
-// =========================================================================
-unsigned long SIMULATION_SPEED = 1; // Default 1x
-// =========================================================================
+unsigned long SIMULATION_SPEED = 1;
 
 bool isSystemRunning = false;
 int currentFase = 0;
 
-// TIMESTAMPS UNTUK SIMULASI DAN PERGANTIAN HARI
 uint32_t startRealUnix = 0; 
 uint32_t baseSimUnix = 0; 
-uint32_t simStartUnix = 0;  // Anchored to 00:00:00 of Start Day
+uint32_t simStartUnix = 0;  
 
 int currentDayCount = 1;
 
 bool needUpdate = true;
 bool isOutputActive = false;
 
+// State Tombol Hijau (Reset)
 bool lastNavState = HIGH;
+
+// State Tombol Biru (Pindah Fase)
 bool lastSelectState = HIGH;
-unsigned long lastDebounceTimeNav = 0;
-unsigned long lastDebounceTimeSelect = 0;
-const unsigned long debounceDelay = 50;
+
 unsigned long lastRtcUpdate = 0;
 
 const int relayPins[8]  = {4, 5, 6, 7, 15, 16, 17, 18}; 
@@ -59,11 +54,9 @@ const int buttonPins[6] = {10, 11, 12, 13, 38, 39};
 const int angleTertutup = 0;  
 const int angleTerbuka  = 90; 
 
-// DURASI SIMULASI DALAM DETIK (480 Detik = 8 Menit Simulasi)
-const unsigned long durasiPenyiramanManualDetik = 5; 
-const unsigned long durasiOtomatisDetik = 480; 
+const unsigned long durasiOtomatisDetik = 480; // 8 Menit Simulasi
 
-unsigned long autoStartSimUnix = 0; // Menggunakan Unix Time Simulasi
+unsigned long autoStartSimUnix = 0; 
 bool isAutoTriggered = false;
 int lastTriggeredHour = -1;
 
@@ -72,17 +65,19 @@ bool buzzerState = false;
 const unsigned long BUZZER_ON_TIME  = 200;
 const unsigned long BUZZER_OFF_TIME = 800;
 
+// State Latching Penyiraman Manual
 bool isWatering[4] = {false, false, false, false};
-unsigned long wateringEndTime[4] = {0, 0, 0, 0};
-
-// State tombol manual untuk edge detection
 bool lastButtonState[4] = {HIGH, HIGH, HIGH, HIGH};
 
+// FORWARD DECLARATIONS
 void updateDisplay(unsigned long currentMillis, DateTime simNow);
+void setPhaseAndStart(int targetPhase, DateTime realNow);
+void updateSystemOutputs();
+void triggerAllActuators(bool turnOn);
 
 void writeServoAngle(int index, int angle) {
   uint32_t duty = map(angle, 0, 180, 410, 2048); 
-  ledcWrite(index, duty); // index di sini langsung merujuk ke PWM channel (0-3)
+  ledcWrite(index, duty); 
 }
 
 bool isAnyManualActive() {
@@ -90,6 +85,20 @@ bool isAnyManualActive() {
     if (isWatering[i]) return true;
   }
   return false;
+}
+
+void toggleManualWatering(int index) {
+  if (isAutoTriggered) return; 
+
+  isWatering[index] = !isWatering[index]; 
+  
+  int targetAngle = isWatering[index] ? angleTerbuka : angleTertutup;
+  writeServoAngle(index, targetAngle);
+  digitalWrite(relayPins[index * 2], isWatering[index] ? HIGH : LOW);
+  digitalWrite(relayPins[(index * 2) + 1], isWatering[index] ? HIGH : LOW);
+  
+  updateSystemOutputs();
+  needUpdate = true;
 }
 
 void updateBuzzerPattern(unsigned long currentMillis) {
@@ -138,6 +147,27 @@ bool checkPhaseSchedule(int phase, int hour) {
   return false;
 }
 
+void setPhaseAndStart(int targetPhase, DateTime realNow) {
+  isSystemRunning = true;
+  currentFase = targetPhase;
+  
+  if (targetPhase == 0)      currentDayCount = 1;
+  else if (targetPhase == 1) currentDayCount = 11;
+  else if (targetPhase == 2) currentDayCount = 31;
+  else if (targetPhase == 3) currentDayCount = 61;
+
+  startRealUnix = realNow.unixtime(); 
+  baseSimUnix = realNow.unixtime();
+
+  DateTime startOfDay(realNow.year(), realNow.month(), realNow.day(), 0, 0, 0);
+  simStartUnix = startOfDay.unixtime() - ((uint32_t)(currentDayCount - 1) * 86400UL);
+
+  isAutoTriggered = false;
+  isOutputActive = false;
+  lastTriggeredHour = -1;
+  needUpdate = true;
+}
+
 void checkSerialSpeedInput(DateTime realNow, DateTime &simNow) {
   if (Serial.available() > 0) {
     int val = Serial.parseInt();
@@ -154,91 +184,22 @@ void checkSerialSpeedInput(DateTime realNow, DateTime &simNow) {
   }
 }
 
-// =========================================================================
-// BLYNK VIRTUAL PIN HANDLERS (V1 - V6)
-// =========================================================================
+// BLYNK HANDLERS
+BLYNK_WRITE(V1) { if (param.asInt() == 1) toggleManualWatering(0); }
+BLYNK_WRITE(V2) { if (param.asInt() == 1) toggleManualWatering(1); }
+BLYNK_WRITE(V3) { if (param.asInt() == 1) toggleManualWatering(2); }
+BLYNK_WRITE(V4) { if (param.asInt() == 1) toggleManualWatering(3); }
 
-// Kontrol Manual Servo 1 (V1)
-BLYNK_WRITE(V1) {
-  int pinValue = param.asInt();
-  if (pinValue == 1 && !isAutoTriggered && !isWatering[0]) {
-    isWatering[0] = true;
-    wateringEndTime[0] = millis() + (durasiPenyiramanManualDetik * 1000UL);
-    writeServoAngle(0, angleTerbuka);
-    digitalWrite(relayPins[0], HIGH);
-    digitalWrite(relayPins[1], HIGH);
-    updateSystemOutputs();
-    needUpdate = true;
-  }
-}
-
-// Kontrol Manual Servo 2 (V2)
-BLYNK_WRITE(V2) {
-  int pinValue = param.asInt();
-  if (pinValue == 1 && !isAutoTriggered && !isWatering[1]) {
-    isWatering[1] = true;
-    wateringEndTime[1] = millis() + (durasiPenyiramanManualDetik * 1000UL);
-    writeServoAngle(1, angleTerbuka);
-    digitalWrite(relayPins[2], HIGH);
-    digitalWrite(relayPins[3], HIGH);
-    updateSystemOutputs();
-    needUpdate = true;
-  }
-}
-
-// Kontrol Manual Servo 3 (V3)
-BLYNK_WRITE(V3) {
-  int pinValue = param.asInt();
-  if (pinValue == 1 && !isAutoTriggered && !isWatering[2]) {
-    isWatering[2] = true;
-    wateringEndTime[2] = millis() + (durasiPenyiramanManualDetik * 1000UL);
-    writeServoAngle(2, angleTerbuka);
-    digitalWrite(relayPins[4], HIGH);
-    digitalWrite(relayPins[5], HIGH);
-    updateSystemOutputs();
-    needUpdate = true;
-  }
-}
-
-// Kontrol Manual Servo 4 (V4)
-BLYNK_WRITE(V4) {
-  int pinValue = param.asInt();
-  if (pinValue == 1 && !isAutoTriggered && !isWatering[3]) {
-    isWatering[3] = true;
-    wateringEndTime[3] = millis() + (durasiPenyiramanManualDetik * 1000UL);
-    writeServoAngle(3, angleTerbuka);
-    digitalWrite(relayPins[6], HIGH);
-    digitalWrite(relayPins[7], HIGH);
-    updateSystemOutputs();
-    needUpdate = true;
-  }
-}
-
-// Tombol Start Sistem dari Blynk (V5) - Menggantikan Tombol Hijau
 BLYNK_WRITE(V5) {
-  int pinValue = param.asInt();
-  if (pinValue == 1 && !isSystemRunning) {
-    isSystemRunning = true;
+  if (param.asInt() == 1) {
     DateTime realNow = rtc.now();
-    startRealUnix = realNow.unixtime(); 
-    baseSimUnix = realNow.unixtime();
-    
-    DateTime startOfDay(realNow.year(), realNow.month(), realNow.day(), 0, 0, 0);
-    simStartUnix = startOfDay.unixtime();
-
-    currentFase = 0;
-    currentDayCount = 1; 
-    isAutoTriggered = false;
-    isOutputActive = false;
-    lastTriggeredHour = -1;
-    needUpdate = true;
+    int nextFase = isSystemRunning ? (currentFase + 1) % 4 : 0;
+    setPhaseAndStart(nextFase, realNow);
   }
 }
 
-// Tombol Reset / Standby dari Blynk (V6) - Menggantikan Tombol Biru
 BLYNK_WRITE(V6) {
-  int pinValue = param.asInt();
-  if (pinValue == 1) {
+  if (param.asInt() == 1) {
     isSystemRunning = false;
     currentFase = 0;
     currentDayCount = 1;
@@ -256,8 +217,8 @@ void setup() {
   Serial.begin(115200);
 
   for (int i = 0; i < 4; i++) {
-    ledcSetup(i, 50, 14);          // Inisialisasi channel PWM (0-3)
-    ledcAttachPin(servoPins[i], i); // Hubungkan pin servo ke channel
+    ledcSetup(i, 50, 14);          
+    ledcAttachPin(servoPins[i], i); 
     writeServoAngle(i, angleTertutup);
   }
 
@@ -268,31 +229,29 @@ void setup() {
   for (int i = 0; i < 4; i++) { 
     pinMode(buttonPins[i], INPUT_PULLUP); 
   }
-  
+
   pinMode(BTN_NAV_PIN, INPUT_PULLUP);
   pinMode(BTN_SELECT_PIN, INPUT_PULLUP);
   pinMode(RELAY_PIN, OUTPUT);
   pinMode(LED_PIN, OUTPUT);
   pinMode(BUZZER_PIN, OUTPUT);
   digitalWrite(BUZZER_PIN, LOW);
-  
+
   Wire.begin(SDA_PIN, SCL_PIN);
   lcd.init();
   lcd.backlight();
   lcd.clear();
   rtc.begin();
 
-  // Koneksi ke Blynk IoT
   Blynk.begin(auth, ssid, pass);
 }
 
 void loop() {
-  Blynk.run(); // Menjaga koneksi Blynk tetap aktif
+  Blynk.run();
 
   unsigned long currentMillis = millis();
   DateTime realNow = rtc.now();
 
-  // Hitung Waktu Simulasi & Pergantian Hari
   DateTime simNow;
   if (isSystemRunning) {
     uint32_t elapsedRealSeconds = realNow.unixtime() - startRealUnix;
@@ -308,80 +267,44 @@ void loop() {
 
   checkSerialSpeedInput(realNow, simNow);
 
-  // 1. PENYIRAMAN MANUAL DENGAN EDGE DETECTION (FISIK & TIMEOUT)
-  if (!isAutoTriggered) {
-    for (int i = 0; i < 4; i++) {
-      bool currentBtnState = digitalRead(buttonPins[i]);
-      
-      if (currentBtnState == LOW && lastButtonState[i] == HIGH && !isWatering[i]) {
-        isWatering[i] = true;
-        wateringEndTime[i] = currentMillis + (durasiPenyiramanManualDetik * 1000UL);
-        writeServoAngle(i, angleTerbuka);
-        digitalWrite(relayPins[i * 2], HIGH);
-        digitalWrite(relayPins[(i * 2) + 1], HIGH);
-        updateSystemOutputs();
-        needUpdate = true;
-      }
-      lastButtonState[i] = currentBtnState;
-
-      if (isWatering[i] && currentMillis >= wateringEndTime[i]) {
-        isWatering[i] = false;
-        writeServoAngle(i, angleTertutup);
-        digitalWrite(relayPins[i * 2], LOW);
-        digitalWrite(relayPins[(i * 2) + 1], LOW);
-        updateSystemOutputs();
-        needUpdate = true;
-      }
+  // 1. KONTROL MANUAL LATCHING (FISIK)
+  for (int i = 0; i < 4; i++) {
+    bool currentBtnState = digitalRead(buttonPins[i]);
+    if (currentBtnState == LOW && lastButtonState[i] == HIGH) {
+      toggleManualWatering(i);
     }
+    lastButtonState[i] = currentBtnState;
   }
 
-  // 2. Update Buzzer
+  // 2. UPDATE BUZZER PATTERN
   updateBuzzerPattern(currentMillis);
 
-  // 3. Tombol Reset / Standby Fisik (BTN_NAV_PIN)
-  bool readingNav = digitalRead(BTN_NAV_PIN);
-  if (readingNav != lastNavState) lastDebounceTimeNav = currentMillis;
-  if ((currentMillis - lastDebounceTimeNav) > debounceDelay) {
-    static bool navState = HIGH;
-    if (readingNav == LOW && navState == HIGH) {
-      isSystemRunning = false;
-      currentFase = 0;
-      currentDayCount = 1;
-      simStartUnix = 0;
-      isAutoTriggered = false;
-      isOutputActive = false;
-      lastTriggeredHour = -1;
-      updateSystemOutputs();
-      triggerAllActuators(false);
-      needUpdate = true;
-    }
-    navState = readingNav;
+  // 3. LOGIKA TOMBOL BIRU (BTN_NAV_PIN / Pin 38) -> RESET / STANDBY
+  bool currentNavState = digitalRead(BTN_NAV_PIN);
+  if (currentNavState == LOW && lastNavState == HIGH) {
+    Serial.println("RESET SISTEM TO STANDBY");
+    isSystemRunning = false;
+    currentFase = 0;
+    currentDayCount = 1;
+    simStartUnix = 0;
+    isAutoTriggered = false;
+    isOutputActive = false;
+    lastTriggeredHour = -1;
+    updateSystemOutputs();
+    triggerAllActuators(false);
+    needUpdate = true;
   }
-  lastNavState = readingNav;
+  lastNavState = currentNavState;
 
-  // 4. Tombol Start Fisik (BTN_SELECT_PIN)
-  bool readingSelect = digitalRead(BTN_SELECT_PIN);
-  if (readingSelect != lastSelectState) lastDebounceTimeSelect = currentMillis;
-  if ((currentMillis - lastDebounceTimeSelect) > debounceDelay) {
-    static bool selectState = HIGH;
-    if (readingSelect == LOW && selectState == HIGH) {
-      isSystemRunning = true;
-      startRealUnix = realNow.unixtime(); 
-      baseSimUnix = realNow.unixtime();
-      
-      DateTime startOfDay(realNow.year(), realNow.month(), realNow.day(), 0, 0, 0);
-      simStartUnix = startOfDay.unixtime();
-
-      currentFase = 0;
-      currentDayCount = 1; 
-      isAutoTriggered = false;
-      isOutputActive = false;
-      lastTriggeredHour = -1;
-      needUpdate = true;
-    }
-    selectState = readingSelect;
+  // 4. LOGIKA TOMBOL HIJAU (BTN_SELECT_PIN / Pin 39) -> START / PINDAH FASE NEXT
+  bool currentSelectState = digitalRead(BTN_SELECT_PIN);
+  if (currentSelectState == LOW && lastSelectState == HIGH) {
+    int targetFase = isSystemRunning ? (currentFase + 1) % 4 : 0;
+    Serial.print("PINDAH FASE KE: ");
+    Serial.println(targetFase);
+    setPhaseAndStart(targetFase, realNow);
   }
-  lastSelectState = readingSelect;
+  lastSelectState = currentSelectState;
 
   // 5. LOGIKA OTOMATIS & FASE
   if (isSystemRunning) {
@@ -410,7 +333,7 @@ void loop() {
         isOutputActive = true;
         autoStartSimUnix = simNow.unixtime();
         lastTriggeredHour = simNow.hour();
-        
+
         updateSystemOutputs();
         triggerAllActuators(true);
         needUpdate = true;
@@ -438,7 +361,7 @@ void loop() {
 }
 
 void updateDisplay(unsigned long currentMillis, DateTime simNow) {
-  // 1. TAMPILAN LCD FISIK
+  // 1. DISPLAY LCD
   lcd.setCursor(0, 0);
   if (!isSystemRunning) {
     lcd.print("FASE: STANDBY       ");
@@ -462,25 +385,16 @@ void updateDisplay(unsigned long currentMillis, DateTime simNow) {
   bool isSystemActive = isOutputActive || isAnyManualActive();
   lcd.print(isSystemActive ? "STATUS : Keran Aktif" : "STATUS  : STANDBY   ");
 
+  // Baris ke-4: Tetap Jam berjalan
   lcd.setCursor(0, 3);
   char line4Buf[21];
   long remainingSimSeconds = 0;
 
-  if (isSystemActive) {
-    if (isAutoTriggered) {
-      uint32_t simSecondsPassed = simNow.unixtime() - autoStartSimUnix;
-      if (simSecondsPassed < durasiOtomatisDetik) {
-        remainingSimSeconds = durasiOtomatisDetik - simSecondsPassed;
-      }
-    } else if (isAnyManualActive()) {
-      for (int i = 0; i < 4; i++) {
-        if (isWatering[i] && currentMillis < wateringEndTime[i]) {
-          long sec = (wateringEndTime[i] - currentMillis) / 1000UL;
-          if (sec > remainingSimSeconds) remainingSimSeconds = sec;
-        }
-      }
+  if (isAutoTriggered) {
+    uint32_t simSecondsPassed = simNow.unixtime() - autoStartSimUnix;
+    if (simSecondsPassed < durasiOtomatisDetik) {
+      remainingSimSeconds = durasiOtomatisDetik - simSecondsPassed;
     }
-
     int displayMin = remainingSimSeconds / 60;
     int displaySec = remainingSimSeconds % 60;
     snprintf(line4Buf, sizeof(line4Buf), "DURASI  : %02d:%02d      ", displayMin, displaySec);
@@ -489,11 +403,7 @@ void updateDisplay(unsigned long currentMillis, DateTime simNow) {
   }
   lcd.print(line4Buf);
 
-  // =========================================================================
-  // 2. KIRIM KE 4 VIRTUAL PIN BLYNK TERPISAH (V7 - V10)
-  // =========================================================================
-  
-  // Tentukan String Fase (V7)
+  // 2. DASHBOARD BLYNK (V7 - V10)
   const char* faseStr = "STANDBY";
   if (isSystemRunning) {
     if (currentFase == 0) faseStr = "Awal";
@@ -503,18 +413,15 @@ void updateDisplay(unsigned long currentMillis, DateTime simNow) {
   }
   Blynk.virtualWrite(V7, faseStr);
 
-  // Tentukan Hari Ke (V8)
   if (isSystemRunning) {
     Blynk.virtualWrite(V8, currentDayCount);
   } else {
     Blynk.virtualWrite(V8, "-");
   }
 
-  // Tentukan Status Sistem (V9)
   Blynk.virtualWrite(V9, isSystemActive ? "Keran Aktif" : "STANDBY");
 
-  // Tentukan Jam atau Durasi Sisa (V10)
-  if (isSystemActive) {
+  if (isAutoTriggered) {
     int displayMin = remainingSimSeconds / 60;
     int displaySec = remainingSimSeconds % 60;
     char durasiBuf[10];
