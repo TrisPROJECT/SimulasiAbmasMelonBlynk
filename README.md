@@ -1,0 +1,1 @@
+to tolong lanjutin ya
