@@ -68,6 +68,7 @@ const unsigned long BUZZER_OFF_TIME = 800;
 // State Latching Penyiraman Manual
 bool isWatering[4] = {false, false, false, false};
 bool lastButtonState[4] = {HIGH, HIGH, HIGH, HIGH};
+bool blynkManualState[4] = {false, false, false, false}; // Status dari tombol switch Blynk
 
 // FORWARD DECLARATIONS
 void updateDisplay(unsigned long currentMillis, DateTime simNow);
@@ -85,20 +86,6 @@ bool isAnyManualActive() {
     if (isWatering[i]) return true;
   }
   return false;
-}
-
-void toggleManualWatering(int index) {
-  if (isAutoTriggered) return; 
-
-  isWatering[index] = !isWatering[index]; 
-  
-  int targetAngle = isWatering[index] ? angleTerbuka : angleTertutup;
-  writeServoAngle(index, targetAngle);
-  digitalWrite(relayPins[index * 2], isWatering[index] ? HIGH : LOW);
-  digitalWrite(relayPins[(index * 2) + 1], isWatering[index] ? HIGH : LOW);
-  
-  updateSystemOutputs();
-  needUpdate = true;
 }
 
 void updateBuzzerPattern(unsigned long currentMillis) {
@@ -184,17 +171,17 @@ void checkSerialSpeedInput(DateTime realNow, DateTime &simNow) {
   }
 }
 
-// BLYNK HANDLERS
-BLYNK_WRITE(V1) { if (param.asInt() == 1) toggleManualWatering(0); }
-BLYNK_WRITE(V2) { if (param.asInt() == 1) toggleManualWatering(1); }
-BLYNK_WRITE(V3) { if (param.asInt() == 1) toggleManualWatering(2); }
-BLYNK_WRITE(V4) { if (param.asInt() == 1) toggleManualWatering(3); }
+// BLYNK HANDLERS UNTUK TOMBOL SWITCH SERVO (V1 - V4)
+BLYNK_WRITE(V1) { blynkManualState[0] = (param.asInt() == 1); needUpdate = true; }
+BLYNK_WRITE(V2) { blynkManualState[1] = (param.asInt() == 1); needUpdate = true; }
+BLYNK_WRITE(V3) { blynkManualState[2] = (param.asInt() == 1); needUpdate = true; }
+BLYNK_WRITE(V4) { blynkManualState[3] = (param.asInt() == 1); needUpdate = true; }
 
 BLYNK_WRITE(V5) {
   if (param.asInt() == 1) {
     DateTime realNow = rtc.now();
-    int nextFase = isSystemRunning ? (currentFase + 1) % 4 : 0;
-    setPhaseAndStart(nextFase, realNow);
+    int targetFase = isSystemRunning ? (currentFase + 1) % 4 : 0;
+    setPhaseAndStart(targetFase, realNow);
   }
 }
 
@@ -267,13 +254,23 @@ void loop() {
 
   checkSerialSpeedInput(realNow, simNow);
 
-  // 1. KONTROL MANUAL LATCHING (FISIK)
-  for (int i = 0; i < 4; i++) {
-    bool currentBtnState = digitalRead(buttonPins[i]);
-    if (currentBtnState == LOW && lastButtonState[i] == HIGH) {
-      toggleManualWatering(i);
+  // 1. KONTROL MANUAL (GABUNGAN TOMBOL FISIK & SWITCH BLYNK)
+  if (!isAutoTriggered) {
+    for (int i = 0; i < 4; i++) {
+      bool currentBtnState = digitalRead(buttonPins[i]);
+      // Nyala jika tombol fisik ditekan (LOW) ATAU jika switch Blynk di-ON-kan (blynkManualState true)
+      bool shouldBeWatering = (currentBtnState == LOW) || blynkManualState[i];
+
+      if (isWatering[i] != shouldBeWatering) {
+        isWatering[i] = shouldBeWatering;
+        int targetAngle = isWatering[i] ? angleTerbuka : angleTertutup;
+        writeServoAngle(i, targetAngle);
+        digitalWrite(relayPins[i * 2], isWatering[i] ? HIGH : LOW);
+        digitalWrite(relayPins[(i * 2) + 1], isWatering[i] ? HIGH : LOW);
+        updateSystemOutputs();
+        needUpdate = true;
+      }
     }
-    lastButtonState[i] = currentBtnState;
   }
 
   // 2. UPDATE BUZZER PATTERN
