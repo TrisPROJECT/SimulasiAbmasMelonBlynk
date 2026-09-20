@@ -17,8 +17,8 @@ RTC_DS1307 rtc;
 #define SCL_PIN 40
 #define BTN_NAV_PIN 38
 #define BTN_SELECT_PIN 39
-#define RELAY_PIN 36
-#define LED_PIN 35
+#define BTN_MANUAL_MAIN_PIN 21
+#define RELAY_PIN 8   // Relay utama di bawah (kontrol LED bawah)
 #define BUZZER_PIN 42
 
 char auth[] = BLYNK_AUTH_TOKEN;
@@ -38,21 +38,17 @@ int currentDayCount = 1;
 
 bool needUpdate = true;
 bool isOutputActive = false;
+bool isMainManualActive = false;
 
-// State Tombol Hijau (Reset)
-bool lastNavState = HIGH;
-
-// State Tombol Biru (Pindah Fase)
-bool lastSelectState = HIGH;
+// State Tombol
+bool lastNavState = LOW;
+bool lastSelectState = LOW;  
 
 unsigned long lastRtcUpdate = 0;
 
-const int relayPins[8]  = {4, 5, 6, 7, 15, 16, 17, 18}; 
-const int servoPins[4]  = {1, 2, 8, 14}; 
+// 4 Relay Atas
+const int relayPins[4]  = {15, 16, 17, 18}; 
 const int buttonPins[6] = {10, 11, 12, 13, 38, 39};            
-
-const int angleTertutup = 0;  
-const int angleTerbuka  = 90; 
 
 const unsigned long durasiOtomatisDetik = 480; // 8 Menit Simulasi
 
@@ -67,19 +63,13 @@ const unsigned long BUZZER_OFF_TIME = 800;
 
 // State Latching Penyiraman Manual
 bool isWatering[4] = {false, false, false, false};
-bool lastButtonState[4] = {HIGH, HIGH, HIGH, HIGH};
-bool blynkManualState[4] = {false, false, false, false}; // Status dari tombol switch Blynk
+bool blynkManualState[4] = {false, false, false, false};
 
 // FORWARD DECLARATIONS
 void updateDisplay(unsigned long currentMillis, DateTime simNow);
 void setPhaseAndStart(int targetPhase, DateTime realNow);
 void updateSystemOutputs();
 void triggerAllActuators(bool turnOn);
-
-void writeServoAngle(int index, int angle) {
-  uint32_t duty = map(angle, 0, 180, 410, 2048); 
-  ledcWrite(index, duty); 
-}
 
 bool isAnyManualActive() {
   for (int i = 0; i < 4; i++) {
@@ -89,7 +79,7 @@ bool isAnyManualActive() {
 }
 
 void updateBuzzerPattern(unsigned long currentMillis) {
-  if (isOutputActive || isAnyManualActive()) {
+  if (isOutputActive || isAnyManualActive() || isMainManualActive) {
     if (buzzerState) {
       if (currentMillis - lastBuzzerToggle >= BUZZER_ON_TIME) {
         buzzerState = false;
@@ -110,19 +100,18 @@ void updateBuzzerPattern(unsigned long currentMillis) {
 }
 
 void updateSystemOutputs() {
-  bool shouldOutputsBeOn = isOutputActive || isAnyManualActive();
-  digitalWrite(RELAY_PIN, shouldOutputsBeOn ? HIGH : LOW);
-  digitalWrite(LED_PIN, shouldOutputsBeOn ? HIGH : LOW);
+  // Relay Utama HANYA merespons jadwal otomatis ATAU tombol manual utamanya sendiri
+  bool isMainRelayOn = isOutputActive || isMainManualActive;
+  
+  // Fisik Relay: LOW untuk nyala, HIGH untuk mati
+  digitalWrite(RELAY_PIN, isMainRelayOn ? LOW : HIGH);
 }
 
 void triggerAllActuators(bool turnOn) {
-  int targetAngle = turnOn ? angleTerbuka : angleTertutup;
+  // Fisik Relay: LOW untuk nyala, HIGH untuk mati
   for (int i = 0; i < 4; i++) { 
     isWatering[i] = false; 
-    writeServoAngle(i, targetAngle); 
-  }
-  for (int i = 0; i < 8; i++) { 
-    digitalWrite(relayPins[i], turnOn ? HIGH : LOW); 
+    digitalWrite(relayPins[i], turnOn ? LOW : HIGH); 
   }
 }
 
@@ -153,6 +142,8 @@ void setPhaseAndStart(int targetPhase, DateTime realNow) {
   isOutputActive = false;
   lastTriggeredHour = -1;
   needUpdate = true;
+  
+  updateSystemOutputs();
 }
 
 void checkSerialSpeedInput(DateTime realNow, DateTime &simNow) {
@@ -171,7 +162,7 @@ void checkSerialSpeedInput(DateTime realNow, DateTime &simNow) {
   }
 }
 
-// BLYNK HANDLERS UNTUK TOMBOL SWITCH SERVO (V1 - V4)
+// BLYNK HANDLERS
 BLYNK_WRITE(V1) { blynkManualState[0] = (param.asInt() == 1); needUpdate = true; }
 BLYNK_WRITE(V2) { blynkManualState[1] = (param.asInt() == 1); needUpdate = true; }
 BLYNK_WRITE(V3) { blynkManualState[2] = (param.asInt() == 1); needUpdate = true; }
@@ -203,24 +194,24 @@ BLYNK_WRITE(V6) {
 void setup() {
   Serial.begin(115200);
 
-  for (int i = 0; i < 4; i++) {
-    ledcSetup(i, 50, 14);          
-    ledcAttachPin(servoPins[i], i); 
-    writeServoAngle(i, angleTertutup);
-  }
-
-  for (int i = 0; i < 8; i++) { 
-    pinMode(relayPins[i], OUTPUT); 
-    digitalWrite(relayPins[i], LOW); 
-  }
+  // Set Relay ke HIGH agar posisi awal mati (karena Active-LOW)
   for (int i = 0; i < 4; i++) { 
-    pinMode(buttonPins[i], INPUT_PULLUP); 
+    pinMode(relayPins[i], OUTPUT); 
+    digitalWrite(relayPins[i], HIGH); 
+  }
+  
+  // Kembalikan ke PULLDOWN karena kabel fisikmu tersambung ke 3.3V
+  for (int i = 0; i < 4; i++) { 
+    pinMode(buttonPins[i], INPUT_PULLDOWN); 
   }
 
-  pinMode(BTN_NAV_PIN, INPUT_PULLUP);
-  pinMode(BTN_SELECT_PIN, INPUT_PULLUP);
+  pinMode(BTN_NAV_PIN, INPUT_PULLDOWN);
+  pinMode(BTN_SELECT_PIN, INPUT_PULLDOWN);
+  pinMode(BTN_MANUAL_MAIN_PIN, INPUT_PULLDOWN); 
+  
   pinMode(RELAY_PIN, OUTPUT);
-  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, HIGH); // Relay utama dimatikan awal (Active-LOW)
+  
   pinMode(BUZZER_PIN, OUTPUT);
   digitalWrite(BUZZER_PIN, LOW);
 
@@ -230,7 +221,19 @@ void setup() {
   lcd.clear();
   rtc.begin();
 
-  Blynk.begin(auth, ssid, pass);
+  lcd.setCursor(0, 0);
+  lcd.print("Menyambung WiFi...  ");
+
+  WiFi.begin(ssid, pass);
+  unsigned long t0 = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 10000) {
+    delay(200);
+  }
+
+  Blynk.config(auth);
+  if (WiFi.status() == WL_CONNECTED) Blynk.connect(5000);
+
+  updateSystemOutputs();
 }
 
 void loop() {
@@ -254,31 +257,26 @@ void loop() {
 
   checkSerialSpeedInput(realNow, simNow);
 
-  // 1. KONTROL MANUAL (GABUNGAN TOMBOL FISIK & SWITCH BLYNK)
+  // 1. KONTROL MANUAL TOMBOL (Kabel 3.3V -> Sinyalnya HIGH saat ditekan)
   if (!isAutoTriggered) {
     for (int i = 0; i < 4; i++) {
       bool currentBtnState = digitalRead(buttonPins[i]);
-      // Nyala jika tombol fisik ditekan (LOW) ATAU jika switch Blynk di-ON-kan (blynkManualState true)
-      bool shouldBeWatering = (currentBtnState == LOW) || blynkManualState[i];
+      bool shouldBeWatering = (currentBtnState == HIGH) || blynkManualState[i];
 
       if (isWatering[i] != shouldBeWatering) {
         isWatering[i] = shouldBeWatering;
-        int targetAngle = isWatering[i] ? angleTerbuka : angleTertutup;
-        writeServoAngle(i, targetAngle);
-        digitalWrite(relayPins[i * 2], isWatering[i] ? HIGH : LOW);
-        digitalWrite(relayPins[(i * 2) + 1], isWatering[i] ? HIGH : LOW);
+        digitalWrite(relayPins[i], isWatering[i] ? LOW : HIGH);
         updateSystemOutputs();
         needUpdate = true;
       }
     }
   }
 
-  // 2. UPDATE BUZZER PATTERN
   updateBuzzerPattern(currentMillis);
 
-  // 3. LOGIKA TOMBOL BIRU (BTN_NAV_PIN / Pin 38) -> RESET / STANDBY
+  // 3. LOGIKA TOMBOL BIRU (RESET / STANDBY)
   bool currentNavState = digitalRead(BTN_NAV_PIN);
-  if (currentNavState == LOW && lastNavState == HIGH) {
+  if (currentNavState == HIGH && lastNavState == LOW) { 
     Serial.println("RESET SISTEM TO STANDBY");
     isSystemRunning = false;
     currentFase = 0;
@@ -293,9 +291,9 @@ void loop() {
   }
   lastNavState = currentNavState;
 
-  // 4. LOGIKA TOMBOL HIJAU (BTN_SELECT_PIN / Pin 39) -> START / PINDAH FASE NEXT
+  // 4. LOGIKA TOMBOL HIJAU (START / PINDAH FASE)
   bool currentSelectState = digitalRead(BTN_SELECT_PIN);
-  if (currentSelectState == LOW && lastSelectState == HIGH) {
+  if (currentSelectState == HIGH && lastSelectState == LOW) { 
     int targetFase = isSystemRunning ? (currentFase + 1) % 4 : 0;
     Serial.print("PINDAH FASE KE: ");
     Serial.println(targetFase);
@@ -303,7 +301,15 @@ void loop() {
   }
   lastSelectState = currentSelectState;
 
-  // 5. LOGIKA OTOMATIS & FASE
+  // LOGIKA TOMBOL MERAH MANUAL MAIN (Sinyal HIGH saat ditekan)
+  bool currentMainManualState = (digitalRead(BTN_MANUAL_MAIN_PIN) == HIGH); 
+  if (isMainManualActive != currentMainManualState) {
+    isMainManualActive = currentMainManualState;
+    updateSystemOutputs(); 
+    needUpdate = true;     
+  }
+
+  // 5. LOGIKA OTOMATIS
   if (isSystemRunning) {
     if (currentDayCount <= 10)      currentFase = 0; 
     else if (currentDayCount <= 30) currentFase = 1; 
@@ -358,7 +364,6 @@ void loop() {
 }
 
 void updateDisplay(unsigned long currentMillis, DateTime simNow) {
-  // 1. DISPLAY LCD
   lcd.setCursor(0, 0);
   if (!isSystemRunning) {
     lcd.print("FASE: STANDBY       ");
@@ -379,10 +384,9 @@ void updateDisplay(unsigned long currentMillis, DateTime simNow) {
   lcd.print(line2Buf);
 
   lcd.setCursor(0, 2);
-  bool isSystemActive = isOutputActive || isAnyManualActive();
+  bool isSystemActive = isOutputActive || isAnyManualActive() || isMainManualActive;
   lcd.print(isSystemActive ? "STATUS : Keran Aktif" : "STATUS  : STANDBY   ");
 
-  // Baris ke-4: Tetap Jam berjalan
   lcd.setCursor(0, 3);
   char line4Buf[21];
   long remainingSimSeconds = 0;
@@ -400,7 +404,6 @@ void updateDisplay(unsigned long currentMillis, DateTime simNow) {
   }
   lcd.print(line4Buf);
 
-  // 2. DASHBOARD BLYNK (V7 - V10)
   const char* faseStr = "STANDBY";
   if (isSystemRunning) {
     if (currentFase == 0) faseStr = "Awal";
@@ -409,13 +412,7 @@ void updateDisplay(unsigned long currentMillis, DateTime simNow) {
     else if (currentFase == 3) faseStr = "Pematangan";
   }
   Blynk.virtualWrite(V7, faseStr);
-
-  if (isSystemRunning) {
-    Blynk.virtualWrite(V8, currentDayCount);
-  } else {
-    Blynk.virtualWrite(V8, "-");
-  }
-
+  Blynk.virtualWrite(V8, isSystemRunning ? String(currentDayCount) : "-");
   Blynk.virtualWrite(V9, isSystemActive ? "Keran Aktif" : "STANDBY");
 
   if (isAutoTriggered) {
