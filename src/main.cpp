@@ -217,7 +217,6 @@ void setup() {
   lcd.init();
   lcd.backlight();
   lcd.clear();
-  rtc.begin();
 
   if (!rtc.begin()) {
     Serial.println("Kabel RTC tidak terdeteksi!");
@@ -226,9 +225,10 @@ void setup() {
   // Memeriksa apakah mesin jam RTC sedang berhenti
   if (!rtc.isrunning()) {
     Serial.println("RTC berhenti! Memulai ulang dan sinkronisasi waktu...");
-    // Perintah ini otomatis mengambil jam laptopmu saat kode ini di-upload
-    rtc.adjust(DateTime(F(__DATE__), F(__TIME__))); 
+    
   }
+  // Perintah ini otomatis mengambil jam laptopmu saat kode ini di-upload
+    rtc.adjust(DateTime(F(__DATE__), F(__TIME__))); 
 
   lcd.setCursor(0, 0);
   lcd.print("Menyambung WiFi...  ");
