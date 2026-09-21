@@ -13,8 +13,8 @@
 LiquidCrystal_I2C lcd(0x27, 20, 4);
 RTC_DS1307 rtc;
 
-#define SDA_PIN 41
-#define SCL_PIN 40
+#define SDA_PIN 7
+#define SCL_PIN 6
 #define BTN_NAV_PIN 38
 #define BTN_SELECT_PIN 39
 #define BTN_MANUAL_MAIN_PIN 21
@@ -40,7 +40,7 @@ bool needUpdate = true;
 bool isOutputActive = false;
 bool isMainManualActive = false;
 
-// State Tombol
+// State Tombol diubah ke LOW karena sekarang kita pakai PULLDOWN
 bool lastNavState = LOW;
 bool lastSelectState = LOW;  
 
@@ -100,11 +100,9 @@ void updateBuzzerPattern(unsigned long currentMillis) {
 }
 
 void updateSystemOutputs() {
-  // Relay Utama HANYA merespons jadwal otomatis ATAU tombol manual utamanya sendiri
-  bool isMainRelayOn = isOutputActive || isMainManualActive;
-  
+  bool shouldOutputsBeOn = isOutputActive || isAnyManualActive() || isMainManualActive;
   // Fisik Relay: LOW untuk nyala, HIGH untuk mati
-  digitalWrite(RELAY_PIN, isMainRelayOn ? LOW : HIGH);
+  digitalWrite(RELAY_PIN, shouldOutputsBeOn ? LOW : HIGH);
 }
 
 void triggerAllActuators(bool turnOn) {
@@ -221,6 +219,17 @@ void setup() {
   lcd.clear();
   rtc.begin();
 
+  if (!rtc.begin()) {
+    Serial.println("Kabel RTC tidak terdeteksi!");
+  }
+
+  // Memeriksa apakah mesin jam RTC sedang berhenti
+  if (!rtc.isrunning()) {
+    Serial.println("RTC berhenti! Memulai ulang dan sinkronisasi waktu...");
+    // Perintah ini otomatis mengambil jam laptopmu saat kode ini di-upload
+    rtc.adjust(DateTime(F(__DATE__), F(__TIME__))); 
+  }
+
   lcd.setCursor(0, 0);
   lcd.print("Menyambung WiFi...  ");
 
@@ -261,7 +270,7 @@ void loop() {
   if (!isAutoTriggered) {
     for (int i = 0; i < 4; i++) {
       bool currentBtnState = digitalRead(buttonPins[i]);
-      bool shouldBeWatering = (currentBtnState == HIGH) || blynkManualState[i];
+      bool shouldBeWatering = (currentBtnState == HIGH) || blynkManualState[i]; // <--- UBAH KE HIGH
 
       if (isWatering[i] != shouldBeWatering) {
         isWatering[i] = shouldBeWatering;
@@ -276,7 +285,7 @@ void loop() {
 
   // 3. LOGIKA TOMBOL BIRU (RESET / STANDBY)
   bool currentNavState = digitalRead(BTN_NAV_PIN);
-  if (currentNavState == HIGH && lastNavState == LOW) { 
+  if (currentNavState == HIGH && lastNavState == LOW) { // <--- UBAH LOGIKA TRANSISI KE HIGH
     Serial.println("RESET SISTEM TO STANDBY");
     isSystemRunning = false;
     currentFase = 0;
@@ -293,7 +302,7 @@ void loop() {
 
   // 4. LOGIKA TOMBOL HIJAU (START / PINDAH FASE)
   bool currentSelectState = digitalRead(BTN_SELECT_PIN);
-  if (currentSelectState == HIGH && lastSelectState == LOW) { 
+  if (currentSelectState == HIGH && lastSelectState == LOW) { // <--- UBAH LOGIKA TRANSISI KE HIGH
     int targetFase = isSystemRunning ? (currentFase + 1) % 4 : 0;
     Serial.print("PINDAH FASE KE: ");
     Serial.println(targetFase);
@@ -302,7 +311,7 @@ void loop() {
   lastSelectState = currentSelectState;
 
   // LOGIKA TOMBOL MERAH MANUAL MAIN (Sinyal HIGH saat ditekan)
-  bool currentMainManualState = (digitalRead(BTN_MANUAL_MAIN_PIN) == HIGH); 
+  bool currentMainManualState = (digitalRead(BTN_MANUAL_MAIN_PIN) == HIGH); // <--- UBAH KE HIGH
   if (isMainManualActive != currentMainManualState) {
     isMainManualActive = currentMainManualState;
     updateSystemOutputs(); 
@@ -385,7 +394,7 @@ void updateDisplay(unsigned long currentMillis, DateTime simNow) {
 
   lcd.setCursor(0, 2);
   bool isSystemActive = isOutputActive || isAnyManualActive() || isMainManualActive;
-  lcd.print(isSystemActive ? "STATUS : Keran Aktif" : "STATUS  : STANDBY   ");
+  lcd.print(isSystemActive ? "STATUS : Pompa Aktif" : "STATUS  : STANDBY   ");
 
   lcd.setCursor(0, 3);
   char line4Buf[21];
