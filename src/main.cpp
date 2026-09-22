@@ -228,7 +228,7 @@ void setup() {
     
   }
   // Perintah ini otomatis mengambil jam laptopmu saat kode ini di-upload
-    rtc.adjust(DateTime(F(__DATE__), F(__TIME__))); 
+  //  rtc.adjust(DateTime(F(__DATE__), F(__TIME__))); 
 
   lcd.setCursor(0, 0);
   lcd.print("Menyambung WiFi...  ");
