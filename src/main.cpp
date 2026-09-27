@@ -9,6 +9,7 @@
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 #include <RTClib.h>
+#include <Time.h>
 
 LiquidCrystal_I2C lcd(0x27, 20, 4);
 RTC_DS1307 rtc;
@@ -24,6 +25,10 @@ RTC_DS1307 rtc;
 char auth[] = BLYNK_AUTH_TOKEN;
 char ssid[] = "Wokwi-GUEST";
 char pass[] = "";
+
+const char* ntpServer = "pool.ntp.org";
+const long  gmtOffset_sec = 25200; 
+const int   daylightOffset_sec = 0;
 
 unsigned long SIMULATION_SPEED = 1;
 
@@ -239,6 +244,25 @@ void setup() {
     delay(200);
   }
 
+  // JIKA WIFI TERHUBUNG, SINKRONKAN JAM DENGAN INTERNET!
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nWiFi Terhubung! Mengambil jam dari Internet...");
+    lcd.setCursor(0, 1);
+    lcd.print("Sinkronisasi Jam...");
+    
+    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer); // <--- Konek ke Server Jam
+    
+    struct tm timeinfo;
+    if (getLocalTime(&timeinfo, 10000)) { // <--- Tunggu balasan dari internet maksimal 10 detik
+      
+      // <--- Menyetel ulang jam fisik RTC secara otomatis! --->
+      rtc.adjust(DateTime(timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday, timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec));
+      
+      Serial.println("Jam RTC berhasil diperbarui dari Internet!");
+    } else {
+      Serial.println("Gagal sinkron NTP, menggunakan jam RTC bawaan.");
+    }
+  }
   Blynk.config(auth);
   if (WiFi.status() == WL_CONNECTED) Blynk.connect(5000);
 
