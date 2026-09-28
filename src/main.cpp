@@ -12,14 +12,14 @@
 #include <Time.h>
 
 LiquidCrystal_I2C lcd(0x27, 20, 4);
-RTC_DS1307 rtc;
+RTC_DS3231 rtc;
 
 #define SDA_PIN 7
 #define SCL_PIN 6
 #define BTN_NAV_PIN 38
 #define BTN_SELECT_PIN 39
 #define BTN_MANUAL_MAIN_PIN 21
-#define RELAY_PIN 8   // Relay utama di bawah (kontrol LED bawah)
+#define RELAY_PIN 8   
 #define BUZZER_PIN 42
 
 char auth[] = BLYNK_AUTH_TOKEN;
@@ -27,8 +27,8 @@ char ssid[] = "Wokwi-GUEST";
 char pass[] = "";
 
 const char* ntpServer = "pool.ntp.org";
-const long  gmtOffset_sec = 25200; 
-const int   daylightOffset_sec = 0;
+const long   gmtOffset_sec = 25200; // WIB (UTC+7)
+const int    daylightOffset_sec = 0;
 
 unsigned long SIMULATION_SPEED = 1;
 
@@ -45,17 +45,15 @@ bool needUpdate = true;
 bool isOutputActive = false;
 bool isMainManualActive = false;
 
-// State Tombol diubah ke LOW karena sekarang kita pakai PULLDOWN
 bool lastNavState = LOW;
 bool lastSelectState = LOW;  
 
 unsigned long lastRtcUpdate = 0;
 
-// 4 Relay Atas
 const int relayPins[4]  = {15, 16, 17, 18}; 
 const int buttonPins[6] = {10, 11, 12, 13, 38, 39};            
 
-const unsigned long durasiOtomatisDetik = 480; // 8 Menit Simulasi
+const unsigned long durasiOtomatisDetik = 480; 
 
 unsigned long autoStartSimUnix = 0; 
 bool isAutoTriggered = false;
@@ -66,11 +64,9 @@ bool buzzerState = false;
 const unsigned long BUZZER_ON_TIME  = 200;
 const unsigned long BUZZER_OFF_TIME = 800;
 
-// State Latching Penyiraman Manual
 bool isWatering[4] = {false, false, false, false};
 bool blynkManualState[4] = {false, false, false, false};
 
-// FORWARD DECLARATIONS
 void updateDisplay(unsigned long currentMillis, DateTime simNow);
 void setPhaseAndStart(int targetPhase, DateTime realNow);
 void updateSystemOutputs();
@@ -106,12 +102,10 @@ void updateBuzzerPattern(unsigned long currentMillis) {
 
 void updateSystemOutputs() {
   bool shouldOutputsBeOn = isOutputActive || isAnyManualActive() || isMainManualActive;
-  // Fisik Relay: LOW untuk nyala, HIGH untuk mati
   digitalWrite(RELAY_PIN, shouldOutputsBeOn ? LOW : HIGH);
 }
 
 void triggerAllActuators(bool turnOn) {
-  // Fisik Relay: LOW untuk nyala, HIGH untuk mati
   for (int i = 0; i < 4; i++) { 
     isWatering[i] = false; 
     digitalWrite(relayPins[i], turnOn ? LOW : HIGH); 
@@ -165,7 +159,6 @@ void checkSerialSpeedInput(DateTime realNow, DateTime &simNow) {
   }
 }
 
-// BLYNK HANDLERS
 BLYNK_WRITE(V1) { blynkManualState[0] = (param.asInt() == 1); needUpdate = true; }
 BLYNK_WRITE(V2) { blynkManualState[1] = (param.asInt() == 1); needUpdate = true; }
 BLYNK_WRITE(V3) { blynkManualState[2] = (param.asInt() == 1); needUpdate = true; }
@@ -197,13 +190,11 @@ BLYNK_WRITE(V6) {
 void setup() {
   Serial.begin(115200);
 
-  // Set Relay ke HIGH agar posisi awal mati (karena Active-LOW)
   for (int i = 0; i < 4; i++) { 
     pinMode(relayPins[i], OUTPUT); 
     digitalWrite(relayPins[i], HIGH); 
   }
   
-  // Kembalikan ke PULLDOWN karena kabel fisikmu tersambung ke 3.3V
   for (int i = 0; i < 4; i++) { 
     pinMode(buttonPins[i], INPUT_PULLDOWN); 
   }
@@ -213,59 +204,83 @@ void setup() {
   pinMode(BTN_MANUAL_MAIN_PIN, INPUT_PULLDOWN); 
   
   pinMode(RELAY_PIN, OUTPUT);
-  digitalWrite(RELAY_PIN, HIGH); // Relay utama dimatikan awal (Active-LOW)
+  digitalWrite(RELAY_PIN, HIGH);
   
   pinMode(BUZZER_PIN, OUTPUT);
   digitalWrite(BUZZER_PIN, LOW);
 
+  // Inisialisasi eksplisit I2C untuk ESP32-S3 (SDA: GPIO7, SCL: GPIO6)
   Wire.begin(SDA_PIN, SCL_PIN);
+  delay(100);
+
   lcd.init();
   lcd.backlight();
   lcd.clear();
 
   if (!rtc.begin()) {
-    Serial.println("Kabel RTC tidak terdeteksi!");
+    Serial.println("[ERROR] RTC DS3231 Tidak Terdeteksi pada Bus I2C!");
+  } else {
+    Serial.println("[OK] RTC DS3231 Terdeteksi.");
+    //rtc.adjust(DateTime(2026, 9, 28, 20, 48, 0));
   }
 
-  // Memeriksa apakah mesin jam RTC sedang berhenti
-  if (!rtc.isrunning()) {
-    Serial.println("RTC berhenti! Memulai ulang dan sinkronisasi waktu...");
-    
+  // Cek apakah RTC tereset / kehilangan baterai
+  if (rtc.lostPower()) {
+    Serial.println("[WARN] RTC Kehilangan Baterai/Daya! Mengatur waktu awal kompilasi.");
+    //rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
   }
-  // Perintah ini otomatis mengambil jam laptopmu saat kode ini di-upload
-  //  rtc.adjust(DateTime(F(__DATE__), F(__TIME__))); 
 
   lcd.setCursor(0, 0);
   lcd.print("Menyambung WiFi...  ");
 
   WiFi.begin(ssid, pass);
   unsigned long t0 = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 10000) {
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 8000) {
     delay(200);
   }
 
-  // JIKA WIFI TERHUBUNG, SINKRONKAN JAM DENGAN INTERNET!
+  // Sinkronisasi Internet (NTP)
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\nWiFi Terhubung! Mengambil jam dari Internet...");
+    Serial.println("\n[WiFi] Terhubung! Mengambil jam presisi dari Internet (NTP)...");
     lcd.setCursor(0, 1);
-    lcd.print("Sinkronisasi Jam...");
+    lcd.print("Sinkron Waktu NTP...");
     
-    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer); // <--- Konek ke Server Jam
+    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
     
     struct tm timeinfo;
-    if (getLocalTime(&timeinfo, 10000)) { // <--- Tunggu balasan dari internet maksimal 10 detik
-      
-      // <--- Menyetel ulang jam fisik RTC secara otomatis! --->
-      rtc.adjust(DateTime(timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday, timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec));
-      
-      Serial.println("Jam RTC berhasil diperbarui dari Internet!");
-    } else {
-      Serial.println("Gagal sinkron NTP, menggunakan jam RTC bawaan.");
-    }
-  }
-  Blynk.config(auth);
-  if (WiFi.status() == WL_CONNECTED) Blynk.connect(5000);
+    bool ntpSuccess = false;
 
+    for (int i = 0; i < 10; i++) {
+      if (getLocalTime(&timeinfo, 1000)) { 
+        ntpSuccess = true;
+        break;
+      }
+      delay(500);
+    }
+
+    if (ntpSuccess) {
+      rtc.adjust(DateTime(timeinfo.tm_year + 1900, 
+                          timeinfo.tm_mon + 1, 
+                          timeinfo.tm_mday, 
+                          timeinfo.tm_hour, 
+                          timeinfo.tm_min, 
+                          timeinfo.tm_sec));
+      
+      Serial.println("[OK] RTC berhasil diperbarui dari Internet!");
+      lcd.setCursor(0, 1);
+      lcd.print("Jam Ter-update!     ");
+      delay(800);
+    } else {
+      Serial.println("[FAIL] Gagal mendapat respon NTP. Memakai waktu simpanan RTC.");
+    }
+  } else {
+    Serial.println("[WiFi] Tidak terhubung. Menggunakan jam simpanan baterai RTC.");
+  }
+
+  Blynk.config(auth);
+  if (WiFi.status() == WL_CONNECTED) Blynk.connect(3000);
+
+  lcd.clear();
   updateSystemOutputs();
 }
 
@@ -290,11 +305,10 @@ void loop() {
 
   checkSerialSpeedInput(realNow, simNow);
 
-  // 1. KONTROL MANUAL TOMBOL (Kabel 3.3V -> Sinyalnya HIGH saat ditekan)
   if (!isAutoTriggered) {
     for (int i = 0; i < 4; i++) {
       bool currentBtnState = digitalRead(buttonPins[i]);
-      bool shouldBeWatering = (currentBtnState == HIGH) || blynkManualState[i]; // <--- UBAH KE HIGH
+      bool shouldBeWatering = (currentBtnState == HIGH) || blynkManualState[i];
 
       if (isWatering[i] != shouldBeWatering) {
         isWatering[i] = shouldBeWatering;
@@ -307,9 +321,8 @@ void loop() {
 
   updateBuzzerPattern(currentMillis);
 
-  // 3. LOGIKA TOMBOL BIRU (RESET / STANDBY)
   bool currentNavState = digitalRead(BTN_NAV_PIN);
-  if (currentNavState == HIGH && lastNavState == LOW) { // <--- UBAH LOGIKA TRANSISI KE HIGH
+  if (currentNavState == HIGH && lastNavState == LOW) {
     Serial.println("RESET SISTEM TO STANDBY");
     isSystemRunning = false;
     currentFase = 0;
@@ -324,9 +337,8 @@ void loop() {
   }
   lastNavState = currentNavState;
 
-  // 4. LOGIKA TOMBOL HIJAU (START / PINDAH FASE)
   bool currentSelectState = digitalRead(BTN_SELECT_PIN);
-  if (currentSelectState == HIGH && lastSelectState == LOW) { // <--- UBAH LOGIKA TRANSISI KE HIGH
+  if (currentSelectState == HIGH && lastSelectState == LOW) {
     int targetFase = isSystemRunning ? (currentFase + 1) % 4 : 0;
     Serial.print("PINDAH FASE KE: ");
     Serial.println(targetFase);
@@ -334,15 +346,13 @@ void loop() {
   }
   lastSelectState = currentSelectState;
 
-  // LOGIKA TOMBOL MERAH MANUAL MAIN (Sinyal HIGH saat ditekan)
-  bool currentMainManualState = (digitalRead(BTN_MANUAL_MAIN_PIN) == HIGH); // <--- UBAH KE HIGH
+  bool currentMainManualState = (digitalRead(BTN_MANUAL_MAIN_PIN) == HIGH);
   if (isMainManualActive != currentMainManualState) {
     isMainManualActive = currentMainManualState;
     updateSystemOutputs(); 
     needUpdate = true;     
   }
 
-  // 5. LOGIKA OTOMATIS
   if (isSystemRunning) {
     if (currentDayCount <= 10)      currentFase = 0; 
     else if (currentDayCount <= 30) currentFase = 1; 
