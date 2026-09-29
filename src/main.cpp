@@ -10,9 +10,11 @@
 #include <LiquidCrystal_I2C.h>
 #include <RTClib.h>
 #include <Time.h>
+#include <Preferences.h> // Library NVS Flash Memori ESP32
 
 LiquidCrystal_I2C lcd(0x27, 20, 4);
 RTC_DS3231 rtc;
+Preferences preferences; // Objek penyimpanan Flash memori
 
 #define SDA_PIN 7
 #define SCL_PIN 6
@@ -23,8 +25,8 @@ RTC_DS3231 rtc;
 #define BUZZER_PIN 42
 
 char auth[] = BLYNK_AUTH_TOKEN;
-char ssid[] = "Wokwi-GUEST";
-char pass[] = "";
+char ssid[] = "TvwvR";
+char pass[] = "sapipanggang99";
 
 const char* ntpServer = "pool.ntp.org";
 const long   gmtOffset_sec = 25200; // WIB (UTC+7)
@@ -67,16 +69,49 @@ const unsigned long BUZZER_OFF_TIME = 800;
 bool isWatering[4] = {false, false, false, false};
 bool blynkManualState[4] = {false, false, false, false};
 
+// FORWARD DECLARATIONS
 void updateDisplay(unsigned long currentMillis, DateTime simNow);
 void setPhaseAndStart(int targetPhase, DateTime realNow);
 void updateSystemOutputs();
 void triggerAllActuators(bool turnOn);
+void saveSystemState();
+void loadSystemState();
 
 bool isAnyManualActive() {
   for (int i = 0; i < 4; i++) {
     if (isWatering[i]) return true;
   }
   return false;
+}
+
+// --- FUNGSI SIMPAN & BACA STATE KE FLASH MEMORI (NVS) ---
+void saveSystemState() {
+  preferences.begin("system_state", false);
+  preferences.putBool("isRunning", isSystemRunning);
+  preferences.putInt("fase", currentFase);
+  preferences.putInt("dayCount", currentDayCount);
+  preferences.putUInt("startReal", startRealUnix);
+  preferences.putUInt("baseSim", baseSimUnix);
+  preferences.putUInt("simStart", simStartUnix);
+  preferences.end();
+  Serial.println("[NVS] Status sistem berhasil disimpan ke Flash!");
+}
+
+void loadSystemState() {
+  preferences.begin("system_state", true); // Mode Read-Only
+  isSystemRunning = preferences.getBool("isRunning", false);
+  currentFase = preferences.getInt("fase", 0);
+  currentDayCount = preferences.getInt("dayCount", 1);
+  startRealUnix = preferences.getUInt("startReal", 0);
+  baseSimUnix = preferences.getUInt("baseSim", 0);
+  simStartUnix = preferences.getUInt("simStart", 0);
+  preferences.end();
+
+  if (isSystemRunning) {
+    Serial.printf("[NVS] Memulihkan Status: Running = YA, Fase = %d, Hari Ke = %d\n", currentFase, currentDayCount);
+  } else {
+    Serial.println("[NVS] Status Terakhir: STANDBY");
+  }
 }
 
 void updateBuzzerPattern(unsigned long currentMillis) {
@@ -141,6 +176,7 @@ void setPhaseAndStart(int targetPhase, DateTime realNow) {
   needUpdate = true;
   
   updateSystemOutputs();
+  saveSystemState(); // Simpan perubahan kondisi ke Flash
 }
 
 void checkSerialSpeedInput(DateTime realNow, DateTime &simNow) {
@@ -150,6 +186,7 @@ void checkSerialSpeedInput(DateTime realNow, DateTime &simNow) {
       if (isSystemRunning) {
         baseSimUnix = simNow.unixtime();
         startRealUnix = realNow.unixtime();
+        saveSystemState();
       }
       SIMULATION_SPEED = val;
       Serial.print("-> Kecepatan Simulasi Diubah ke: ");
@@ -159,6 +196,7 @@ void checkSerialSpeedInput(DateTime realNow, DateTime &simNow) {
   }
 }
 
+// BLYNK HANDLERS
 BLYNK_WRITE(V1) { blynkManualState[0] = (param.asInt() == 1); needUpdate = true; }
 BLYNK_WRITE(V2) { blynkManualState[1] = (param.asInt() == 1); needUpdate = true; }
 BLYNK_WRITE(V3) { blynkManualState[2] = (param.asInt() == 1); needUpdate = true; }
@@ -184,6 +222,7 @@ BLYNK_WRITE(V6) {
     updateSystemOutputs();
     triggerAllActuators(false);
     needUpdate = true;
+    saveSystemState(); // Simpan reset state ke Flash
   }
 }
 
@@ -209,7 +248,6 @@ void setup() {
   pinMode(BUZZER_PIN, OUTPUT);
   digitalWrite(BUZZER_PIN, LOW);
 
-  // Inisialisasi eksplisit I2C untuk ESP32-S3 (SDA: GPIO7, SCL: GPIO6)
   Wire.begin(SDA_PIN, SCL_PIN);
   delay(100);
 
@@ -218,17 +256,18 @@ void setup() {
   lcd.clear();
 
   if (!rtc.begin()) {
-    Serial.println("[ERROR] RTC DS3231 Tidak Terdeteksi pada Bus I2C!");
+    Serial.println("[ERROR] RTC DS3231 Tidak Terdeteksi!");
   } else {
     Serial.println("[OK] RTC DS3231 Terdeteksi.");
-    //rtc.adjust(DateTime(2026, 9, 28, 20, 48, 0));
   }
 
-  // Cek apakah RTC tereset / kehilangan baterai
   if (rtc.lostPower()) {
-    Serial.println("[WARN] RTC Kehilangan Baterai/Daya! Mengatur waktu awal kompilasi.");
-    //rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+    Serial.println("[WARN] RTC Kehilangan Baterai! Mengatur waktu awal kompilasi.");
+    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
   }
+
+  // BACAPADA STARTUP: Pulihkan status sistem dari Flash memori
+  loadSystemState();
 
   lcd.setCursor(0, 0);
   lcd.print("Menyambung WiFi...  ");
@@ -239,12 +278,8 @@ void setup() {
     delay(200);
   }
 
-  // Sinkronisasi Internet (NTP)
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\n[WiFi] Terhubung! Mengambil jam presisi dari Internet (NTP)...");
-    lcd.setCursor(0, 1);
-    lcd.print("Sinkron Waktu NTP...");
-    
+    Serial.println("\n[WiFi] Terhubung! Mengambil jam dari NTP...");
     configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
     
     struct tm timeinfo;
@@ -255,7 +290,7 @@ void setup() {
         ntpSuccess = true;
         break;
       }
-      delay(500);
+      delay(300);
     }
 
     if (ntpSuccess) {
@@ -265,20 +300,14 @@ void setup() {
                           timeinfo.tm_hour, 
                           timeinfo.tm_min, 
                           timeinfo.tm_sec));
-      
-      Serial.println("[OK] RTC berhasil diperbarui dari Internet!");
-      lcd.setCursor(0, 1);
-      lcd.print("Jam Ter-update!     ");
-      delay(800);
-    } else {
-      Serial.println("[FAIL] Gagal mendapat respon NTP. Memakai waktu simpanan RTC.");
+      Serial.println("[OK] RTC berhasil disinkronkan ke NTP!");
     }
-  } else {
-    Serial.println("[WiFi] Tidak terhubung. Menggunakan jam simpanan baterai RTC.");
   }
 
   Blynk.config(auth);
-  if (WiFi.status() == WL_CONNECTED) Blynk.connect(3000);
+  if (WiFi.status() == WL_CONNECTED) {
+    Blynk.connect(10000); // wifi connect
+  }
 
   lcd.clear();
   updateSystemOutputs();
@@ -298,7 +327,13 @@ void loop() {
     simNow = DateTime(simUnix);
 
     uint32_t totalSimSecondsPassed = simUnix - simStartUnix; 
-    currentDayCount = (totalSimSecondsPassed / 86400UL) + 1;
+    int calculatedDay = (totalSimSecondsPassed / 86400UL) + 1;
+
+    // Jika terjadi pergantian Hari, simpan perubahan hari ke Flash
+    if (calculatedDay != currentDayCount) {
+      currentDayCount = calculatedDay;
+      saveSystemState();
+    }
   } else {
     simNow = realNow;
   }
@@ -321,6 +356,7 @@ void loop() {
 
   updateBuzzerPattern(currentMillis);
 
+  // RESET TO STANDBY VIA TOMBOL BIRU
   bool currentNavState = digitalRead(BTN_NAV_PIN);
   if (currentNavState == HIGH && lastNavState == LOW) {
     Serial.println("RESET SISTEM TO STANDBY");
@@ -334,9 +370,11 @@ void loop() {
     updateSystemOutputs();
     triggerAllActuators(false);
     needUpdate = true;
+    saveSystemState(); // Simpan Reset State ke Flash
   }
   lastNavState = currentNavState;
 
+  // PINDAH FASE VIA TOMBOL HIJAU
   bool currentSelectState = digitalRead(BTN_SELECT_PIN);
   if (currentSelectState == HIGH && lastSelectState == LOW) {
     int targetFase = isSystemRunning ? (currentFase + 1) % 4 : 0;
@@ -354,11 +392,19 @@ void loop() {
   }
 
   if (isSystemRunning) {
+    int oldFase = currentFase;
     if (currentDayCount <= 10)      currentFase = 0; 
     else if (currentDayCount <= 30) currentFase = 1; 
     else if (currentDayCount <= 60) currentFase = 2; 
     else if (currentDayCount <= 75) currentFase = 3; 
-    else isSystemRunning = false; 
+    else {
+      isSystemRunning = false;
+      saveSystemState();
+    }
+
+    if (oldFase != currentFase) {
+      saveSystemState(); // Jika fase berubah otomatis berdasarkan hari, simpan ke Flash
+    }
 
     if (isAutoTriggered) {
       uint32_t simSecondsPassed = simNow.unixtime() - autoStartSimUnix;
