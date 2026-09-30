@@ -24,9 +24,11 @@ Preferences preferences; // Objek penyimpanan Flash memori
 #define RELAY_PIN 8   
 #define BUZZER_PIN 42
 
+
+//ganti secara manual sesuai hp sendiri
 char auth[] = BLYNK_AUTH_TOKEN;
-char ssid[] = "TvwvR";
-char pass[] = "sapipanggang99";
+char ssid[] = "esp32";
+char pass[] = "sayamain2";
 
 const char* ntpServer = "pool.ntp.org";
 const long   gmtOffset_sec = 25200; // WIB (UTC+7)
@@ -68,6 +70,7 @@ const unsigned long BUZZER_OFF_TIME = 800;
 
 bool isWatering[4] = {false, false, false, false};
 bool blynkManualState[4] = {false, false, false, false};
+bool blynkMainManualState = false;
 
 // FORWARD DECLARATIONS
 void updateDisplay(unsigned long currentMillis, DateTime simNow);
@@ -83,6 +86,8 @@ bool isAnyManualActive() {
   }
   return false;
 }
+
+
 
 // --- FUNGSI SIMPAN & BACA STATE KE FLASH MEMORI (NVS) ---
 void saveSystemState() {
@@ -202,6 +207,7 @@ BLYNK_WRITE(V2) { blynkManualState[1] = (param.asInt() == 1); needUpdate = true;
 BLYNK_WRITE(V3) { blynkManualState[2] = (param.asInt() == 1); needUpdate = true; }
 BLYNK_WRITE(V4) { blynkManualState[3] = (param.asInt() == 1); needUpdate = true; }
 
+
 BLYNK_WRITE(V5) {
   if (param.asInt() == 1) {
     DateTime realNow = rtc.now();
@@ -226,15 +232,18 @@ BLYNK_WRITE(V6) {
   }
 }
 
-void setup() {
-  Serial.begin(115200);
+BLYNK_WRITE(V11) {
+  blynkMainManualState = (param.asInt() == 1);
+  needUpdate = true;
+}
 
+void setup() {
+Serial.begin(115200);
+
+  // Initialisasi Relay & Button
   for (int i = 0; i < 4; i++) { 
     pinMode(relayPins[i], OUTPUT); 
     digitalWrite(relayPins[i], HIGH); 
-  }
-  
-  for (int i = 0; i < 4; i++) { 
     pinMode(buttonPins[i], INPUT_PULLDOWN); 
   }
 
@@ -262,51 +271,52 @@ void setup() {
   }
 
   if (rtc.lostPower()) {
-    Serial.println("[WARN] RTC Kehilangan Baterai! Mengatur waktu awal kompilasi.");
+    Serial.println("[WARN] RTC Kehilangan Baterai! Mengatur waktu awal.");
     rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
   }
 
-  // BACAPADA STARTUP: Pulihkan status sistem dari Flash memori
+  // Restore State dari Flash NVS
   loadSystemState();
 
   lcd.setCursor(0, 0);
-  lcd.print("Menyambung WiFi...  ");
+  lcd.print("Konek WiFi & Blynk..");
 
+  // 1. SET MODE WIFI STATION
+  WiFi.mode(WIFI_STA);
+  
+  // 2. CONFIG BLYNK DULU (Server SGP1)
+  Blynk.config(auth, "blynk.cloud", 80);
+
+  // 3. MULAI KONEKSI WIFI & BLYNK
   WiFi.begin(ssid, pass);
+  
+  Serial.print("[WiFi] Menghubungkan ke: ");
+  Serial.println(ssid);
+
   unsigned long t0 = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 8000) {
-    delay(200);
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 10000) {
+    delay(300);
+    Serial.print(".");
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\n[WiFi] Terhubung! Mengambil jam dari NTP...");
+    Serial.println("\n[WiFi] TERHUBUNG!");
+    Serial.print("[WiFi] IP Address: ");
+    Serial.println(WiFi.localIP());
+
+    // Coba Konek ke Blynk Server
+    Serial.println("[Blynk] Menghubungkan ke Server...");
+    Blynk.connect(5000); 
+
+    // Ambil Waktu NTP
     configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
-    
     struct tm timeinfo;
-    bool ntpSuccess = false;
-
-    for (int i = 0; i < 10; i++) {
-      if (getLocalTime(&timeinfo, 1000)) { 
-        ntpSuccess = true;
-        break;
-      }
-      delay(300);
+    if (getLocalTime(&timeinfo, 2000)) {
+      rtc.adjust(DateTime(timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday, timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec));
+      Serial.println("[NTP] RTC Berhasil Disinkronkan!");
     }
-
-    if (ntpSuccess) {
-      rtc.adjust(DateTime(timeinfo.tm_year + 1900, 
-                          timeinfo.tm_mon + 1, 
-                          timeinfo.tm_mday, 
-                          timeinfo.tm_hour, 
-                          timeinfo.tm_min, 
-                          timeinfo.tm_sec));
-      Serial.println("[OK] RTC berhasil disinkronkan ke NTP!");
-    }
-  }
-
-  Blynk.config(auth);
-  if (WiFi.status() == WL_CONNECTED) {
-    Blynk.connect(10000); // wifi connect
+  } else {
+    Serial.println("\n[WiFi] GAGAL TERHUBUNG! Cek SSID/Password/Pita 2.4GHz.");
   }
 
   lcd.clear();
@@ -314,7 +324,14 @@ void setup() {
 }
 
 void loop() {
-  Blynk.run();
+// Hanya jalankan Blynk jika WiFi terhubung
+  if (WiFi.status() == WL_CONNECTED) {
+    if (!Blynk.connected()) {
+      Blynk.connect(1000); // Reconnect otomatis secara berkala jika terputus
+    } else {
+      Blynk.run();
+    }
+  }
 
   unsigned long currentMillis = millis();
   DateTime realNow = rtc.now();
@@ -329,7 +346,6 @@ void loop() {
     uint32_t totalSimSecondsPassed = simUnix - simStartUnix; 
     int calculatedDay = (totalSimSecondsPassed / 86400UL) + 1;
 
-    // Jika terjadi pergantian Hari, simpan perubahan hari ke Flash
     if (calculatedDay != currentDayCount) {
       currentDayCount = calculatedDay;
       saveSystemState();
@@ -356,7 +372,7 @@ void loop() {
 
   updateBuzzerPattern(currentMillis);
 
-  // RESET TO STANDBY VIA TOMBOL BIRU
+  // RESET TO STANDBY
   bool currentNavState = digitalRead(BTN_NAV_PIN);
   if (currentNavState == HIGH && lastNavState == LOW) {
     Serial.println("RESET SISTEM TO STANDBY");
@@ -370,11 +386,11 @@ void loop() {
     updateSystemOutputs();
     triggerAllActuators(false);
     needUpdate = true;
-    saveSystemState(); // Simpan Reset State ke Flash
+    saveSystemState();
   }
   lastNavState = currentNavState;
 
-  // PINDAH FASE VIA TOMBOL HIJAU
+  // PINDAH FASE
   bool currentSelectState = digitalRead(BTN_SELECT_PIN);
   if (currentSelectState == HIGH && lastSelectState == LOW) {
     int targetFase = isSystemRunning ? (currentFase + 1) % 4 : 0;
@@ -384,13 +400,13 @@ void loop() {
   }
   lastSelectState = currentSelectState;
 
-  bool currentMainManualState = (digitalRead(BTN_MANUAL_MAIN_PIN) == HIGH);
+// LOGIKA TOMBOL MERAH MANUAL MAIN (Gabungan Tombol Fisik + Blynk V11)
+  bool currentMainManualState = (digitalRead(BTN_MANUAL_MAIN_PIN) == HIGH) || blynkMainManualState;
   if (isMainManualActive != currentMainManualState) {
     isMainManualActive = currentMainManualState;
     updateSystemOutputs(); 
     needUpdate = true;     
   }
-
   if (isSystemRunning) {
     int oldFase = currentFase;
     if (currentDayCount <= 10)      currentFase = 0; 
@@ -403,7 +419,7 @@ void loop() {
     }
 
     if (oldFase != currentFase) {
-      saveSystemState(); // Jika fase berubah otomatis berdasarkan hari, simpan ke Flash
+      saveSystemState();
     }
 
     if (isAutoTriggered) {
