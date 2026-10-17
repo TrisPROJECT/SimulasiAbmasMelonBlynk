@@ -24,8 +24,7 @@ Preferences preferences; // Objek penyimpanan Flash memori
 #define RELAY_PIN 8   
 #define BUZZER_PIN 42
 
-
-//ganti secara manual sesuai hp sendiri
+// ganti secara manual sesuai hp sendiri
 char auth[] = BLYNK_AUTH_TOKEN;
 char ssid[] = "esp32";
 char pass[] = "sayamain2";
@@ -53,6 +52,11 @@ bool lastNavState = LOW;
 bool lastSelectState = LOW;  
 
 unsigned long lastRtcUpdate = 0;
+
+// TIMING UNTUK MENCEGAH GLITCH LCD (THROTTLING & SELF-HEALING)
+unsigned long lastLcdReset = 0;
+const unsigned long LCD_RESET_INTERVAL = 15000; // Inisialisasi ulang LCD tiap 15 detik jika terkena noise/glitch
+const unsigned long LCD_MIN_REFRESH_INTERVAL = 150; // Jeda minimal antar update LCD (150 ms)
 
 const int relayPins[4]  = {15, 16, 17, 18}; 
 const int buttonPins[6] = {10, 11, 12, 13, 38, 39};            
@@ -86,8 +90,6 @@ bool isAnyManualActive() {
   }
   return false;
 }
-
-
 
 // --- FUNGSI SIMPAN & BACA STATE KE FLASH MEMORI (NVS) ---
 void saveSystemState() {
@@ -153,11 +155,12 @@ void triggerAllActuators(bool turnOn) {
 }
 
 bool checkPhaseSchedule(int phase, int hour) {
-  if (phase == 0)      return (hour == 8 || hour == 12 || hour == 16);
-  else if (phase == 1) return (hour >= 8 && hour <= 15);
-  else if (phase == 2) return (hour >= 8 && hour <= 16);
-  else if (phase == 3) return (hour == 8 || hour == 16);
-  return false;
+  if (phase == 0)      return (hour == 8 || hour == 12 || hour == 16); // STANDBY / AWAL
+  else if (phase == 1) return (hour >= 8 || hour == 15);               // PEMBUNGAAN
+  else if (phase == 2) return (hour == 8 || hour == 16 || hour == 20); // PEMBESARAN
+  else if (phase == 3) return (hour == 8 || hour == 16 || hour == 20); // PEMATANGAN
+  else
+    return false;
 }
 
 void setPhaseAndStart(int targetPhase, DateTime realNow) {
@@ -207,7 +210,6 @@ BLYNK_WRITE(V2) { blynkManualState[1] = (param.asInt() == 1); needUpdate = true;
 BLYNK_WRITE(V3) { blynkManualState[2] = (param.asInt() == 1); needUpdate = true; }
 BLYNK_WRITE(V4) { blynkManualState[3] = (param.asInt() == 1); needUpdate = true; }
 
-
 BLYNK_WRITE(V5) {
   if (param.asInt() == 1) {
     DateTime realNow = rtc.now();
@@ -238,9 +240,9 @@ BLYNK_WRITE(V11) {
 }
 
 void setup() {
-Serial.begin(115200);
+  Serial.begin(115200);
 
-  // Initialisasi Relay & Button
+  // Inisialisasi Relay & Button
   for (int i = 0; i < 4; i++) { 
     pinMode(relayPins[i], OUTPUT); 
     digitalWrite(relayPins[i], HIGH); 
@@ -321,10 +323,11 @@ Serial.begin(115200);
 
   lcd.clear();
   updateSystemOutputs();
+  lastLcdReset = millis();
 }
 
 void loop() {
-// Hanya jalankan Blynk jika WiFi terhubung
+  // Hanya jalankan Blynk jika WiFi terhubung
   if (WiFi.status() == WL_CONNECTED) {
     if (!Blynk.connected()) {
       Blynk.connect(1000); // Reconnect otomatis secara berkala jika terputus
@@ -400,13 +403,14 @@ void loop() {
   }
   lastSelectState = currentSelectState;
 
-// LOGIKA TOMBOL MERAH MANUAL MAIN (Gabungan Tombol Fisik + Blynk V11)
+  // LOGIKA TOMBOL MERAH MANUAL MAIN (Gabungan Tombol Fisik + Blynk V11)
   bool currentMainManualState = (digitalRead(BTN_MANUAL_MAIN_PIN) == HIGH) || blynkMainManualState;
   if (isMainManualActive != currentMainManualState) {
     isMainManualActive = currentMainManualState;
     updateSystemOutputs(); 
     needUpdate = true;     
   }
+
   if (isSystemRunning) {
     int oldFase = currentFase;
     if (currentDayCount <= 10)      currentFase = 0; 
@@ -457,12 +461,22 @@ void loop() {
     }
   }
 
+  // Set flag update periodik
   if (currentMillis - lastRtcUpdate >= 200) { 
-    lastRtcUpdate = currentMillis; 
     needUpdate = true; 
   }
 
-  if (needUpdate) {
+  // --- FEATURE 1: SELF-HEALING LCD (Pemulihan Otomatis Jika LCD Crash) ---
+  if (currentMillis - lastLcdReset >= LCD_RESET_INTERVAL) {
+    lastLcdReset = currentMillis;
+    lcd.init();
+    lcd.backlight();
+    needUpdate = true;
+  }
+
+  // --- FEATURE 2: REFRESH RATE LIMITING (Mencegah Overload I2C Saat Tombol Dipencet Cepat) ---
+  if (needUpdate && (currentMillis - lastRtcUpdate >= LCD_MIN_REFRESH_INTERVAL)) {
+    lastRtcUpdate = currentMillis;
     updateDisplay(currentMillis, simNow);
     needUpdate = false;
   }
