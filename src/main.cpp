@@ -566,14 +566,24 @@ void setup() {
   // Buka portal AP bernama "Setup-Melon-IoT" jika Wi-Fi tidak ditemukan
   bool res = wm.autoConnect("Setup-Melon-IoT");
 
-  if (!res) {
-    Serial.println("[WiFi] Gagal konek / Portal Timeout!");
-  } else {
-    Serial.println("[WiFi] TERHUBUNG ke Router!");
-    Blynk.config(auth, "blynk.cloud", 80);
-    Blynk.connect(5000);
-  }
+if (!res) {
+  Serial.println("[WiFi] Gagal konek / Portal Timeout!");
+} else {
+  Serial.println("[WiFi] TERHUBUNG ke Router!");
+  Serial.print("[WiFi] IP Address: ");
+  Serial.println(WiFi.localIP());
 
+  delay(1000); // Beri jeda 1 detik agar koneksi IP stabil
+
+  Blynk.config(auth, "blynk.cloud", 80);
+
+  // Coba konek ke Blynk dengan timeout lebih longgar (10 detik)
+  if (Blynk.connect(10000)) {
+    Serial.println("[Blynk] TERHUBUNG KE DASHBOARD!");
+  } else {
+    Serial.println("[Blynk] Gagal terhubung ke Blynk Server, cek Auth Token / Firewall.");
+  }
+}
   lcd.clear();
 
   // Jalankan Timer Blynk & Task aplikasi di Core terpisah
