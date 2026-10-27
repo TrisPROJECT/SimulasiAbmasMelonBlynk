@@ -1,5 +1,5 @@
 // =====================================================================
-//  Penyiraman Otomatis ESP32-S3 + WiFiManager + Blynk Standar
+//  Penyiraman Otomatis ESP32-S3 + WiFiManager + Blynk Standar (Log 4s)
 // =====================================================================
 
 #define BLYNK_TEMPLATE_ID "TMPL6AgsBMKHP"
@@ -12,7 +12,7 @@
 #include <WiFi.h>
 #include <WiFiClient.h>
 #include <BlynkSimpleEsp32.h>
-#include <WiFiManager.h> // Pustaka WiFiManager untuk Captive Portal Web
+#include <WiFiManager.h>
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 #include <RTClib.h>
@@ -103,12 +103,37 @@ void saveSystemState();
 void loadSystemState();
 void goNextPhase(DateTime realNow);
 void resetToStandby();
+void printSystemLog();
 
 bool isAnyManualActive() {
   for (int i = 0; i < 4; i++) {
     if (isWatering[i]) return true;
   }
   return false;
+}
+
+// --- FUNGSI PRINT SERIAL LOG SETIAP 4 DETIK ---
+void printSystemLog() {
+  char f[16], h[8], s[16], w[12];
+  portENTER_CRITICAL(&statusMux);
+  strlcpy(f, stFase, sizeof(f));
+  strlcpy(h, stHari, sizeof(h));
+  strlcpy(s, stStatus, sizeof(s));
+  strlcpy(w, stWaktu, sizeof(w));
+  portEXIT_CRITICAL(&statusMux);
+
+  Serial.println("==================================================");
+  Serial.printf("[STATUS SYSTEM - 4s LOOP]\n");
+  Serial.printf(" > WiFi Status    : %s (IP: %s)\n", (WiFi.status() == WL_CONNECTED) ? "CONNECTED" : "DISCONNECTED", WiFi.localIP().toString().c_str());
+  Serial.printf(" > Blynk Cloud   : %s\n", Blynk.connected() ? "ONLINE" : "OFFLINE");
+  Serial.printf(" > System State  : %s\n", isSystemRunning ? "RUNNING" : "STANDBY");
+  Serial.printf(" > Fase          : %s\n", f);
+  Serial.printf(" > Hari Ke       : %s\n", h);
+  Serial.printf(" > Status Pompa  : %s\n", s);
+  Serial.printf(" > Waktu / Durasi: %s\n", w);
+  Serial.printf(" > Manual 1..4   : [%d, %d, %d, %d]\n", isWatering[0], isWatering[1], isWatering[2], isWatering[3]);
+  Serial.printf(" > Main Manual   : %s\n", isMainManualActive ? "AKTIF" : "NONAKTIF");
+  Serial.println("==================================================");
 }
 
 // --- FUNGSI NVS FLASH MEMORY ---
@@ -158,7 +183,7 @@ void updateBuzzerPattern(unsigned long currentMillis) {
     }
   } else {
     digitalWrite(BUZZER_PIN, LOW);
-    buzzerState = false;
+    buzzerState = false; 
   }
 }
 
@@ -267,7 +292,7 @@ void syncNtpIfNeeded() {
 }
 
 void publishStatus(const char* fase, const char* hari, const char* status, const char* waktu) {
-  portENTER_CRITICAL(&statusMux);
+  portENTER_CRITICAL(&statusMux); 
   strlcpy(stFase, fase, sizeof(stFase));
   strlcpy(stHari, hari, sizeof(stHari));
   strlcpy(stStatus, status, sizeof(stStatus));
@@ -530,7 +555,7 @@ void setup() {
   digitalWrite(BUZZER_PIN, LOW);
 
   Wire.begin(SDA_PIN, SCL_PIN);
-  delay(100);
+  delay(1000);
 
   lcd.init();
   lcd.backlight();
@@ -555,39 +580,45 @@ void setup() {
   lcd.setCursor(0, 0);
   lcd.print("Konek WiFi & Blynk..");
 
+  WiFi.setSleep(false);
+
   WiFiManager wm;
-  
-  // Tahan tombol NAV (GPIO 38) saat dinyalakan jika ingin RESET Wi-Fi manual
+  wm.setAPStaticIPConfig(IPAddress(192,168,4,1), IPAddress(192,168,4,1), IPAddress(255,255,255,0));
+  wm.setConfigPortalTimeout(180);
+
   if (digitalRead(BTN_NAV_PIN) == HIGH) {
     Serial.println("[WiFiManager] Reset Wi-Fi tersimpan...");
     wm.resetSettings();
   }
 
-  // Buka portal AP bernama "Setup-Melon-IoT" jika Wi-Fi tidak ditemukan
   bool res = wm.autoConnect("Setup-Melon-IoT");
 
-if (!res) {
-  Serial.println("[WiFi] Gagal konek / Portal Timeout!");
-} else {
-  Serial.println("[WiFi] TERHUBUNG ke Router!");
-  Serial.print("[WiFi] IP Address: ");
-  Serial.println(WiFi.localIP());
-
-  delay(1000); // Beri jeda 1 detik agar koneksi IP stabil
-
-  Blynk.config(auth, "blynk.cloud", 80);
-
-  // Coba konek ke Blynk dengan timeout lebih longgar (10 detik)
-  if (Blynk.connect(10000)) {
-    Serial.println("[Blynk] TERHUBUNG KE DASHBOARD!");
+  if (!res) {
+    Serial.println("[WiFi] Gagal konek / Portal Timeout!");
+    lcd.clear();
+    lcd.print("WiFi Timeout!");
   } else {
-    Serial.println("[Blynk] Gagal terhubung ke Blynk Server, cek Auth Token / Firewall.");
+    Serial.println("[WiFi] TERHUBUNG ke Router!");
+    Serial.print("[WiFi] IP Address: ");
+    Serial.println(WiFi.localIP());
+
+    delay(2000);
+
+    Blynk.config(auth, "128.199.144.129", 80);
+    if (Blynk.connect(5000)) {
+      Serial.println("[Blynk] TERHUBUNG KE DASHBOARD!");
+    } else {
+      Serial.println("[Blynk] Gagal konek ke Cloud, cek Auth Token!");
+    }
   }
-}
   lcd.clear();
 
-  // Jalankan Timer Blynk & Task aplikasi di Core terpisah
+  // Kirim status ke Blynk tiap 1 detik
   timer.setInterval(1000L, sendBlynkStatus);
+
+  // [BARU] Print log sistem ke Serial Monitor tiap 4 detik (4000 ms)
+  timer.setInterval(4000L, printSystemLog);
+
   xTaskCreate(appTask, "appTask", 8192, NULL, 1, NULL);
 }
 
