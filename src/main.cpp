@@ -1,5 +1,5 @@
 // =====================================================================
-//  Penyiraman Otomatis ESP32-S3 + WiFiManager + Blynk Standar (Log 4s)
+//  Penyiraman Otomatis ESP32-S3 + WiFiManager + Blynk + Continuous Log
 // =====================================================================
 
 #define BLYNK_TEMPLATE_ID "TMPL6AgsBMKHP"
@@ -112,28 +112,42 @@ bool isAnyManualActive() {
   return false;
 }
 
-// --- FUNGSI PRINT SERIAL LOG SETIAP 4 DETIK ---
+// --- FUNGSI LOG SERIAL MONITOR DENGAN FORMAT AMAN ---
 void printSystemLog() {
-  char f[16], h[8], s[16], w[12];
-  portENTER_CRITICAL(&statusMux);
-  strlcpy(f, stFase, sizeof(f));
-  strlcpy(h, stHari, sizeof(h));
-  strlcpy(s, stStatus, sizeof(s));
-  strlcpy(w, stWaktu, sizeof(w));
-  portEXIT_CRITICAL(&statusMux);
+  Serial.println("\n==================================================");
+  Serial.println("[STATUS SYSTEM LOG - 4s LOOP]");
 
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print(" > WiFi Status    : CONNECTED (STA Router)\n > IP Address      : ");
+    Serial.println(WiFi.localIP());
+  } else if ((WiFi.getMode() & WIFI_AP) || (WiFi.softAPIP() != IPAddress(0,0,0,0))) {
+    Serial.print(" > WiFi Status    : CAPTIVE PORTAL (AP Active)\n > IP Address      : ");
+    Serial.print(WiFi.softAPIP());
+    Serial.println(" [Connect to Setup-Melon-IoT]");
+  } else {
+    Serial.println(" > WiFi Status    : CONNECTING / INITIALIZING");
+    Serial.println(" > IP Address      : 0.0.0.0");
+  }
+
+  Serial.printf(" > Blynk Cloud     : %s\n", Blynk.connected() ? "ONLINE" : "OFFLINE");
+  Serial.printf(" > System State    : %s\n", isSystemRunning ? "RUNNING" : "STANDBY");
+  Serial.printf(" > Fase            : %s\n", stFase);
+  Serial.printf(" > Hari Ke         : %s\n", stHari);
+  Serial.printf(" > Status Pompa    : %s\n", stStatus);
+  Serial.printf(" > Waktu / Durasi  : %s\n", stWaktu);
+  Serial.printf(" > Manual 1..4     : [%d, %d, %d, %d]\n", isWatering[0], isWatering[1], isWatering[2], isWatering[3]);
+  Serial.printf(" > Main Manual     : %s\n", isMainManualActive ? "AKTIF" : "NONAKTIF");
   Serial.println("==================================================");
-  Serial.printf("[STATUS SYSTEM - 4s LOOP]\n");
-  Serial.printf(" > WiFi Status    : %s (IP: %s)\n", (WiFi.status() == WL_CONNECTED) ? "CONNECTED" : "DISCONNECTED", WiFi.localIP().toString().c_str());
-  Serial.printf(" > Blynk Cloud   : %s\n", Blynk.connected() ? "ONLINE" : "OFFLINE");
-  Serial.printf(" > System State  : %s\n", isSystemRunning ? "RUNNING" : "STANDBY");
-  Serial.printf(" > Fase          : %s\n", f);
-  Serial.printf(" > Hari Ke       : %s\n", h);
-  Serial.printf(" > Status Pompa  : %s\n", s);
-  Serial.printf(" > Waktu / Durasi: %s\n", w);
-  Serial.printf(" > Manual 1..4   : [%d, %d, %d, %d]\n", isWatering[0], isWatering[1], isWatering[2], isWatering[3]);
-  Serial.printf(" > Main Manual   : %s\n", isMainManualActive ? "AKTIF" : "NONAKTIF");
-  Serial.println("==================================================");
+}
+
+// --- FREERTOS TASK LOG SERIAL DI CORE 0 ---
+void serialLogTask(void* pv) {
+  // Beri waktu 3 detik agar hardware USB CDC & WiFi siap
+  vTaskDelay(pdMS_TO_TICKS(3000));
+  for (;;) {
+    printSystemLog();
+    vTaskDelay(pdMS_TO_TICKS(4000));
+  }
 }
 
 // --- FUNGSI NVS FLASH MEMORY ---
@@ -292,12 +306,10 @@ void syncNtpIfNeeded() {
 }
 
 void publishStatus(const char* fase, const char* hari, const char* status, const char* waktu) {
-  portENTER_CRITICAL(&statusMux); 
   strlcpy(stFase, fase, sizeof(stFase));
   strlcpy(stHari, hari, sizeof(stHari));
   strlcpy(stStatus, status, sizeof(stStatus));
   strlcpy(stWaktu, waktu, sizeof(stWaktu));
-  portEXIT_CRITICAL(&statusMux);
 }
 
 char lastF[16] = "", lastH[8] = "", lastS[16] = "", lastW[12] = "";
@@ -305,18 +317,10 @@ char lastF[16] = "", lastH[8] = "", lastS[16] = "", lastW[12] = "";
 void sendBlynkStatus() {
   if (!Blynk.connected()) return;
 
-  char f[16], h[8], s[16], w[12];
-  portENTER_CRITICAL(&statusMux);
-  strlcpy(f, stFase, sizeof(f));
-  strlcpy(h, stHari, sizeof(h));
-  strlcpy(s, stStatus, sizeof(s));
-  strlcpy(w, stWaktu, sizeof(w));
-  portEXIT_CRITICAL(&statusMux);
-
-  if (strcmp(f, lastF)) { Blynk.virtualWrite(V7, f);  strlcpy(lastF, f, sizeof(lastF)); }
-  if (strcmp(h, lastH)) { Blynk.virtualWrite(V8, h);  strlcpy(lastH, h, sizeof(lastH)); }
-  if (strcmp(s, lastS)) { Blynk.virtualWrite(V9, s);  strlcpy(lastS, s, sizeof(lastS)); }
-  if (strcmp(w, lastW)) { Blynk.virtualWrite(V10, w); strlcpy(lastW, w, sizeof(lastW)); }
+  if (strcmp(stFase, lastF))   { Blynk.virtualWrite(V7, stFase);   strlcpy(lastF, stFase, sizeof(lastF)); }
+  if (strcmp(stHari, lastH))   { Blynk.virtualWrite(V8, stHari);   strlcpy(lastH, stHari, sizeof(lastH)); }
+  if (strcmp(stStatus, lastS)) { Blynk.virtualWrite(V9, stStatus); strlcpy(lastS, stStatus, sizeof(lastS)); }
+  if (strcmp(stWaktu, lastW))  { Blynk.virtualWrite(V10, stWaktu); strlcpy(lastW, stWaktu, sizeof(lastW)); }
 }
 
 // BLYNK HANDLERS
@@ -536,90 +540,84 @@ void updateDisplay(unsigned long currentMillis, DateTime simNow) {
 
 void setup() {
   Serial.begin(115200);
-  delay(100);
+  delay(1000); // Tahan 1 detik agar driver USB CDC Windows/VSCode benar-benar siap
 
+  Serial.println("\n[BOOT] Memulai Sistem ESP32-S3...");
+
+  // 1. PIN IN/OUT
   for (int i = 0; i < 4; i++) {
     pinMode(relayPins[i], OUTPUT);
     digitalWrite(relayPins[i], HIGH);
     pinMode(buttonPins[i], INPUT_PULLDOWN);
   }
-
   pinMode(BTN_NAV_PIN, INPUT_PULLDOWN);
   pinMode(BTN_SELECT_PIN, INPUT_PULLDOWN);
   pinMode(BTN_MANUAL_MAIN_PIN, INPUT_PULLDOWN);
-
   pinMode(RELAY_PIN, OUTPUT);
   digitalWrite(RELAY_PIN, HIGH);
-
   pinMode(BUZZER_PIN, OUTPUT);
   digitalWrite(BUZZER_PIN, LOW);
 
-  Wire.begin(SDA_PIN, SCL_PIN);
-  delay(1000);
+  // 2. JALANKAN SERIAL LOG TASK PERTAMA KALI (Agar log 4s PASTI jalan)
+  xTaskCreatePinnedToCore(serialLogTask, "serialLogTask", 8192, NULL, 1, NULL, 0);
 
+  // 3. INISIALISASI I2C SAFE (Mencegah Crash Error -1)
+  Wire.begin(SDA_PIN, SCL_PIN);
+  Wire.setTimeOut(250); // Set timeout I2C pendek agar tidak bikin crash/hang[cite: 6]
+
+  // 4. INISIALISASI LCD
   lcd.init();
   lcd.backlight();
   lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Booting Sistem...");
 
   if (!rtc.begin()) {
-    Serial.println("[ERROR] RTC DS3231 Tidak Terdeteksi!");
+    Serial.println("[ERROR] RTC DS3231 Tidak Terdeteksi! Lanjut tanpa RTC.");
   } else {
     Serial.println("[OK] RTC DS3231 Terdeteksi.");
-  }
-
-  if (rtc.lostPower()) {
-    Serial.println("[WARN] RTC Kehilangan Baterai! Mengatur waktu awal.");
-    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+    if (rtc.lostPower()) {
+      rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+    }
   }
 
   loadSystemState();
   updateSystemOutputs();
   lastLcdReset = millis();
 
-  // --- KONEKSI WIFI LEWAT WIFIMANAGER ---
-  lcd.setCursor(0, 0);
-  lcd.print("Konek WiFi & Blynk..");
-
+  // 4. KONEKSI WIFIMANAGER
   WiFi.setSleep(false);
-
   WiFiManager wm;
-  wm.setAPStaticIPConfig(IPAddress(192,168,4,1), IPAddress(192,168,4,1), IPAddress(255,255,255,0));
+  wm.setAPStaticIPConfig(IPAddress(192,168,4,1), IPAddress(192,168,4,1), IPAddress(255,255,255,0)); //[cite: 1]
   wm.setConfigPortalTimeout(180);
 
   if (digitalRead(BTN_NAV_PIN) == HIGH) {
     Serial.println("[WiFiManager] Reset Wi-Fi tersimpan...");
-    wm.resetSettings();
+    wm.resetSettings(); 
   }
 
-  bool res = wm.autoConnect("Setup-Melon-IoT");
+  bool res = wm.autoConnect("Setup-Melon-IoT"); //[cite: 1]
 
   if (!res) {
-    Serial.println("[WiFi] Gagal konek / Portal Timeout!");
+    Serial.println("[WiFi] Portal Timeout / Gagal. Mode Offline!");
     lcd.clear();
-    lcd.print("WiFi Timeout!");
+    lcd.print("WiFi: Offline");
   } else {
     Serial.println("[WiFi] TERHUBUNG ke Router!");
     Serial.print("[WiFi] IP Address: ");
     Serial.println(WiFi.localIP());
 
-    delay(2000);
-
+    delay(1000);
     Blynk.config(auth, "128.199.144.129", 80);
     if (Blynk.connect(5000)) {
       Serial.println("[Blynk] TERHUBUNG KE DASHBOARD!");
     } else {
-      Serial.println("[Blynk] Gagal konek ke Cloud, cek Auth Token!");
+      Serial.println("[Blynk] Gagal konek ke Cloud!");
     }
   }
-  lcd.clear();
 
-  // Kirim status ke Blynk tiap 1 detik
   timer.setInterval(1000L, sendBlynkStatus);
-
-  // [BARU] Print log sistem ke Serial Monitor tiap 4 detik (4000 ms)
-  timer.setInterval(4000L, printSystemLog);
-
-  xTaskCreate(appTask, "appTask", 8192, NULL, 1, NULL);
+  xTaskCreatePinnedToCore(appTask, "appTask", 8192, NULL, 1, NULL, 1);
 }
 
 void loop() {
