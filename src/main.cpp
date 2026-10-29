@@ -18,6 +18,7 @@
 #include <RTClib.h>
 #include <time.h>
 #include <Preferences.h>
+#include <DNSServer.h>
 
 LiquidCrystal_I2C lcd(0x27, 20, 4);
 RTC_DS3231 rtc;
@@ -142,7 +143,6 @@ void printSystemLog() {
 
 // --- FREERTOS TASK LOG SERIAL DI CORE 0 ---
 void serialLogTask(void* pv) {
-  // Beri waktu 3 detik agar hardware USB CDC & WiFi siap
   vTaskDelay(pdMS_TO_TICKS(3000));
   for (;;) {
     printSystemLog();
@@ -540,7 +540,7 @@ void updateDisplay(unsigned long currentMillis, DateTime simNow) {
 
 void setup() {
   Serial.begin(115200);
-  delay(1000); // Tahan 1 detik agar driver USB CDC Windows/VSCode benar-benar siap
+  delay(1000);
 
   Serial.println("\n[BOOT] Memulai Sistem ESP32-S3...");
 
@@ -558,14 +558,14 @@ void setup() {
   pinMode(BUZZER_PIN, OUTPUT);
   digitalWrite(BUZZER_PIN, LOW);
 
-  // 2. JALANKAN SERIAL LOG TASK PERTAMA KALI (Agar log 4s PASTI jalan)
+  // 2. JALANKAN SERIAL LOG TASK
   xTaskCreatePinnedToCore(serialLogTask, "serialLogTask", 8192, NULL, 1, NULL, 0);
 
-  // 3. INISIALISASI I2C SAFE (Mencegah Crash Error -1)
+  // 3. INISIALISASI I2C SAFE
   Wire.begin(SDA_PIN, SCL_PIN);
-  Wire.setTimeOut(250); // Set timeout I2C pendek agar tidak bikin crash/hang[cite: 6]
+  Wire.setTimeOut(250);
 
-  // 4. INISIALISASI LCD
+  // 4. INISIALISASI LCD & RTC
   lcd.init();
   lcd.backlight();
   lcd.clear();
@@ -585,18 +585,35 @@ void setup() {
   updateSystemOutputs();
   lastLcdReset = millis();
 
-  // 4. KONEKSI WIFIMANAGER
+  // 5. KONEKSI WIFIMANAGER
+  lcd.setCursor(0, 0);
+  lcd.print("Konek WiFi & Blynk..");
+
+  WiFi.disconnect(true, true); 
+  delay(200);
   WiFi.setSleep(false);
+
   WiFiManager wm;
-  wm.setAPStaticIPConfig(IPAddress(192,168,4,1), IPAddress(192,168,4,1), IPAddress(255,255,255,0)); //[cite: 1]
+  wm.setAPStaticIPConfig(IPAddress(192,168,4,1), IPAddress(192,168,4,1), IPAddress(255,255,255,0));
+  wm.setConfigPortalTimeout(180);
+  
+  DNSServer dnsServer;
+  wm.setAPCallback([&dnsServer](WiFiManager *myWiFiManager) {
+    dnsServer.start(53, "*", IPAddress(192, 168, 4, 1));
+    Serial.println("[DNS] Wildcard Redirect Aktif! Memaksa Pop-Up Captive Portal di HP...");
+  });
+
+  // PAKSA REDIRECT OTOMATIS SAAT HP CONNECT TO WIFI
+  wm.setCaptivePortalEnable(true);          // Aktifkan pemicu pop-up Captive Portal
   wm.setConfigPortalTimeout(180);
 
-  if (digitalRead(BTN_NAV_PIN) == HIGH) {
-    Serial.println("[WiFiManager] Reset Wi-Fi tersimpan...");
-    wm.resetSettings(); 
-  }
+  Serial.println("[WiFiManager] Reset Wi-Fi tersimpan...");
+  wm.resetSettings();
 
-  bool res = wm.autoConnect("Setup-Melon-IoT"); //[cite: 1]
+  bool res = wm.autoConnect("Setup-Melon-IoT");
+
+  // Begitu portal selesai/timeout, matikan DNS Server kustom
+  dnsServer.stop();
 
   if (!res) {
     Serial.println("[WiFi] Portal Timeout / Gagal. Mode Offline!");
