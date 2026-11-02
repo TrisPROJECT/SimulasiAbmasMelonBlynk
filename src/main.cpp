@@ -66,11 +66,12 @@ const unsigned long LCD_MIN_REFRESH_INTERVAL = 150;
 const int relayPins[4]  = {15, 16, 17, 18};
 const int buttonPins[6] = {10, 11, 12, 13, 38, 39};
 
-const unsigned long durasiOtomatisDetik = 480;
+const unsigned long durasiOtomatisDetik = 480; // 8 Menit
 
 unsigned long autoStartSimUnix = 0;
 bool isAutoTriggered = false;
-int lastTriggeredHour = -1;
+int lastTriggeredDay = -1;
+int lastTriggeredTimeSlot = -1;
 
 unsigned long lastBuzzerToggle = 0;
 bool buzzerState = false;
@@ -105,6 +106,8 @@ void loadSystemState();
 void goNextPhase(DateTime realNow);
 void resetToStandby();
 void printSystemLog();
+void appLoop();
+void appTask(void* pv);
 
 bool isAnyManualActive() {
   for (int i = 0; i < 4; i++) {
@@ -116,7 +119,7 @@ bool isAnyManualActive() {
 // --- FUNGSI LOG SERIAL MONITOR DENGAN FORMAT AMAN ---
 void printSystemLog() {
   Serial.println("\n==================================================");
-  Serial.println("[STATUS SYSTEM LOG - 4s LOOP]");
+  Serial.println("[STATUS SYSTEM LOG - 1s LOOP]");
 
   if (WiFi.status() == WL_CONNECTED) {
     Serial.print(" > WiFi Status    : CONNECTED (STA Router)\n > IP Address      : ");
@@ -146,7 +149,7 @@ void serialLogTask(void* pv) {
   vTaskDelay(pdMS_TO_TICKS(3000));
   for (;;) {
     printSystemLog();
-    vTaskDelay(pdMS_TO_TICKS(4000));
+    vTaskDelay(pdMS_TO_TICKS(1000));
   }
 }
 
@@ -213,11 +216,12 @@ void triggerAllActuators(bool turnOn) {
   }
 }
 
-bool checkPhaseSchedule(int phase, int hour) {
-  if (phase == 0)      return (hour == 8 || hour == 12 || hour == 16);
-  else if (phase == 1) return (hour >= 8 || hour == 15);
-  else if (phase == 2) return (hour == 8 || hour == 16 || hour == 20);
-  else if (phase == 3) return (hour == 8 || hour == 16 || hour == 20);
+// --- PEMERIKSAAN JADWAL (JAM DAN MENIT SPESIFIK) ---
+bool checkPhaseSchedule(int phase, int hour, int minute) {
+  if (phase == 0)      return (hour == 8 && minute == 0) || (hour == 12 && minute == 0) || (hour == 18 && minute == 55); // Phase 0 (Uji Coba 17:34)
+  else if (phase == 1) return (hour == 8 && minute == 0) || (hour == 15 && minute == 0) || (hour == 16 && minute == 0); // Phase 1 PEMBUNGAAN
+  else if (phase == 2) return (hour == 8 && minute == 0) || (hour == 16 && minute == 0) || (hour == 20 && minute == 0); // Phase 2 PEMBESARAN
+  else if (phase == 3) return (hour == 8 && minute == 0) || (hour == 16 && minute == 0) || (hour == 20 && minute == 0); // Phase 3 PEMATANGAN
   else return false;
 }
 
@@ -238,7 +242,7 @@ void setPhaseAndStart(int targetPhase, DateTime realNow) {
 
   isAutoTriggered = false;
   isOutputActive = false;
-  lastTriggeredHour = -1;
+  lastTriggeredTimeSlot = -1;
   needUpdate = true;
 
   updateSystemOutputs();
@@ -260,7 +264,7 @@ void resetToStandby() {
   simStartUnix = 0;
   isAutoTriggered = false;
   isOutputActive = false;
-  lastTriggeredHour = -1;
+  lastTriggeredTimeSlot = -1;
   updateSystemOutputs();
   triggerAllActuators(false);
   needUpdate = true;
@@ -363,6 +367,7 @@ void appLoop() {
 
   checkSerialSpeedInput(realNow, simNow);
 
+  // --- MANUAL OVERRIDE (Aktif jika TIDAK sedang siram otomatis) ---
   if (!isAutoTriggered) {
     for (int i = 0; i < 4; i++) {
       bool currentBtnState = digitalRead(buttonPins[i]);
@@ -379,6 +384,7 @@ void appLoop() {
 
   updateBuzzerPattern(currentMillis);
 
+  // --- TOMBOL FISIK NAVIGASI ---
   bool currentNavState = digitalRead(BTN_NAV_PIN);
   if (currentNavState == HIGH && lastNavState == LOW) {
     resetToStandby();
@@ -398,6 +404,7 @@ void appLoop() {
     needUpdate = true;
   }
 
+  // --- LOGIKA SISTEM OTOMATIS & PENJADWALAN ---
   if (isSystemRunning) {
     int oldFase = currentFase;
     if (currentDayCount <= 10)      currentFase = 0;
@@ -413,10 +420,12 @@ void appLoop() {
       saveSystemState();
     }
 
+    // 1. Jika Sedang Siram Otomatis -> Hitung Hitung Mundur Durasi (480 Detik)
     if (isAutoTriggered) {
       uint32_t simSecondsPassed = simNow.unixtime() - autoStartSimUnix;
 
       if (simSecondsPassed >= durasiOtomatisDetik) {
+        Serial.println("[JADWAL] Penyiraman Otomatis Selesai!");
         isAutoTriggered = false;
         isOutputActive = false;
         updateSystemOutputs();
@@ -424,14 +433,17 @@ void appLoop() {
         needUpdate = true;
       }
     }
+    // 2. Jika Belum Siram Otomatis -> Cek Jam & Menit Jadwal
     else {
-      bool isScheduleMatch = checkPhaseSchedule(currentFase, simNow.hour());
+      int currentTimeSlot = (simNow.hour() * 100) + simNow.minute();
+      bool isScheduleMatch = checkPhaseSchedule(currentFase, simNow.hour(), simNow.minute());
 
-      if (isScheduleMatch && (simNow.hour() != lastTriggeredHour)) {
+      if (isScheduleMatch && (currentTimeSlot != lastTriggeredTimeSlot)) {
+        Serial.printf("[JADWAL] Pemicu Otomatis Aktif di Jam %02d:%02d!\n", simNow.hour(), simNow.minute());
         isAutoTriggered = true;
         isOutputActive = true;
         autoStartSimUnix = simNow.unixtime();
-        lastTriggeredHour = simNow.hour();
+        lastTriggeredTimeSlot = currentTimeSlot;
 
         updateSystemOutputs();
         triggerAllActuators(true);
@@ -439,6 +451,7 @@ void appLoop() {
       }
     }
   } else {
+    // Jika sistem di-Reset ke STANDBY saat sedang siram, matikan semua output
     if (isOutputActive || isAutoTriggered) {
       isOutputActive = false;
       isAutoTriggered = false;
@@ -448,6 +461,7 @@ void appLoop() {
     }
   }
 
+  // --- REFRESH DISPLAY ---
   if (currentMillis - lastRtcUpdate >= 200) {
     needUpdate = true;
   }
@@ -463,13 +477,6 @@ void appLoop() {
     lastRtcUpdate = currentMillis;
     updateDisplay(currentMillis, simNow);
     needUpdate = false;
-  }
-}
-
-void appTask(void* pv) {
-  for (;;) {
-    appLoop();
-    vTaskDelay(pdMS_TO_TICKS(5));
   }
 }
 
@@ -563,7 +570,7 @@ void setup() {
 
   // 3. INISIALISASI I2C SAFE
   Wire.begin(SDA_PIN, SCL_PIN);
-  Wire.setTimeOut(250);
+  Wire.setTimeOut(100);
 
   // 4. INISIALISASI LCD & RTC
   lcd.init();
@@ -585,7 +592,7 @@ void setup() {
   updateSystemOutputs();
   lastLcdReset = millis();
 
-  // 5. KONEKSI WIFIMANAGER
+  // 5. KONEKSI WIFIMANAGER DENGAN REDIRECT CAPTIVE PORTAL
   lcd.setCursor(0, 0);
   lcd.print("Konek WiFi & Blynk..");
 
@@ -595,7 +602,6 @@ void setup() {
 
   WiFiManager wm;
   wm.setAPStaticIPConfig(IPAddress(192,168,4,1), IPAddress(192,168,4,1), IPAddress(255,255,255,0));
-  wm.setConfigPortalTimeout(180);
   
   DNSServer dnsServer;
   wm.setAPCallback([&dnsServer](WiFiManager *myWiFiManager) {
@@ -603,8 +609,7 @@ void setup() {
     Serial.println("[DNS] Wildcard Redirect Aktif! Memaksa Pop-Up Captive Portal di HP...");
   });
 
-  // PAKSA REDIRECT OTOMATIS SAAT HP CONNECT TO WIFI
-  wm.setCaptivePortalEnable(true);          // Aktifkan pemicu pop-up Captive Portal
+  wm.setCaptivePortalEnable(true);
   wm.setConfigPortalTimeout(180);
 
   Serial.println("[WiFiManager] Reset Wi-Fi tersimpan...");
@@ -612,7 +617,7 @@ void setup() {
 
   bool res = wm.autoConnect("Setup-Melon-IoT");
 
-  // Begitu portal selesai/timeout, matikan DNS Server kustom
+  // Matikan DNS Server kustom begitu portal timeout / selesai
   dnsServer.stop();
 
   if (!res) {
@@ -646,4 +651,12 @@ void loop() {
     }
   }
   timer.run();
+}
+
+// --- PEMBUNGKUS FREERTOS TASK UNTUK APPLOOP (DITARUH PALING BAWAH) ---
+void appTask(void* pv) {
+  for (;;) {
+    appLoop();
+    vTaskDelay(pdMS_TO_TICKS(5));
+  }
 }
