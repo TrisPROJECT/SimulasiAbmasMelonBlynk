@@ -218,7 +218,7 @@ void triggerAllActuators(bool turnOn) {
 
 // --- PEMERIKSAAN JADWAL (JAM DAN MENIT SPESIFIK) ---
 bool checkPhaseSchedule(int phase, int hour, int minute) {
-  if (phase == 0)      return (hour == 8 && minute == 0) || (hour == 12 && minute == 0) || (hour == 18 && minute == 55); // Phase 0 (Uji Coba 17:34)
+  if (phase == 0)      return (hour == 22 && minute == 45) || (hour == 12 && minute == 0) || (hour == 17 && minute == 34); // Phase 0 (Termasuk Pengujian 17:34)
   else if (phase == 1) return (hour == 8 && minute == 0) || (hour == 15 && minute == 0) || (hour == 16 && minute == 0); // Phase 1 PEMBUNGAAN
   else if (phase == 2) return (hour == 8 && minute == 0) || (hour == 16 && minute == 0) || (hour == 20 && minute == 0); // Phase 2 PEMBESARAN
   else if (phase == 3) return (hour == 8 && minute == 0) || (hour == 16 && minute == 0) || (hour == 20 && minute == 0); // Phase 3 PEMATANGAN
@@ -404,7 +404,7 @@ void appLoop() {
     needUpdate = true;
   }
 
-  // --- LOGIKA SISTEM OTOMATIS & PENJADWALAN ---
+  // --- PEMATANGAN/FASING OTOMATIS SAAT RUNNING ---
   if (isSystemRunning) {
     int oldFase = currentFase;
     if (currentDayCount <= 10)      currentFase = 0;
@@ -419,44 +419,36 @@ void appLoop() {
     if (oldFase != currentFase) {
       saveSystemState();
     }
+  }
 
-    // 1. Jika Sedang Siram Otomatis -> Hitung Hitung Mundur Durasi (480 Detik)
-    if (isAutoTriggered) {
-      uint32_t simSecondsPassed = simNow.unixtime() - autoStartSimUnix;
+  // --- LOGIKA PENJADWALAN OTOMATIS (JALAN DI MODE RUNNING MAUPUN STANDBY) ---
+  if (isAutoTriggered) {
+    // 1. Hitung Mundur Durasi Penyiraman Otomatis (480 Detik)
+    uint32_t simSecondsPassed = simNow.unixtime() - autoStartSimUnix;
 
-      if (simSecondsPassed >= durasiOtomatisDetik) {
-        Serial.println("[JADWAL] Penyiraman Otomatis Selesai!");
-        isAutoTriggered = false;
-        isOutputActive = false;
-        updateSystemOutputs();
-        triggerAllActuators(false);
-        needUpdate = true;
-      }
-    }
-    // 2. Jika Belum Siram Otomatis -> Cek Jam & Menit Jadwal
-    else {
-      int currentTimeSlot = (simNow.hour() * 100) + simNow.minute();
-      bool isScheduleMatch = checkPhaseSchedule(currentFase, simNow.hour(), simNow.minute());
-
-      if (isScheduleMatch && (currentTimeSlot != lastTriggeredTimeSlot)) {
-        Serial.printf("[JADWAL] Pemicu Otomatis Aktif di Jam %02d:%02d!\n", simNow.hour(), simNow.minute());
-        isAutoTriggered = true;
-        isOutputActive = true;
-        autoStartSimUnix = simNow.unixtime();
-        lastTriggeredTimeSlot = currentTimeSlot;
-
-        updateSystemOutputs();
-        triggerAllActuators(true);
-        needUpdate = true;
-      }
-    }
-  } else {
-    // Jika sistem di-Reset ke STANDBY saat sedang siram, matikan semua output
-    if (isOutputActive || isAutoTriggered) {
-      isOutputActive = false;
+    if (simSecondsPassed >= durasiOtomatisDetik) {
+      Serial.println("[JADWAL] Penyiraman Otomatis Selesai!");
       isAutoTriggered = false;
+      isOutputActive = false;
       updateSystemOutputs();
       triggerAllActuators(false);
+      needUpdate = true;
+    }
+  }
+  else {
+    // 2. Cek Kesesuaian Jam dan Menit
+    int currentTimeSlot = (simNow.hour() * 100) + simNow.minute();
+    bool isScheduleMatch = checkPhaseSchedule(currentFase, simNow.hour(), simNow.minute());
+
+    if (isScheduleMatch && (currentTimeSlot != lastTriggeredTimeSlot)) {
+      Serial.printf("[JADWAL] Pemicu Otomatis Aktif di Jam %02d:%02d!\n", simNow.hour(), simNow.minute());
+      isAutoTriggered = true;
+      isOutputActive = true;
+      autoStartSimUnix = simNow.unixtime();
+      lastTriggeredTimeSlot = currentTimeSlot;
+
+      updateSystemOutputs();
+      triggerAllActuators(true);
       needUpdate = true;
     }
   }
