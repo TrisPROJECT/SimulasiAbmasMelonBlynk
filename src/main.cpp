@@ -108,6 +108,7 @@ void resetToStandby();
 void printSystemLog();
 void appLoop();
 void appTask(void* pv);
+void setPhaseAndStartCustomDay(int targetPhase, int customDay, DateTime realNow);
 
 bool isAnyManualActive() {
   for (int i = 0; i < 4; i++) {
@@ -218,10 +219,10 @@ void triggerAllActuators(bool turnOn) {
 
 // --- PEMERIKSAAN JADWAL (JAM DAN MENIT SPESIFIK) ---
 bool checkPhaseSchedule(int phase, int hour, int minute) {
-  if (phase == 0)      return (hour == 22 && minute == 45) || (hour == 12 && minute == 0) || (hour == 17 && minute == 34); // Phase 0 (Termasuk Pengujian 17:34)
-  else if (phase == 1) return (hour == 8 && minute == 0) || (hour == 15 && minute == 0) || (hour == 16 && minute == 0); // Phase 1 PEMBUNGAAN
-  else if (phase == 2) return (hour == 8 && minute == 0) || (hour == 16 && minute == 0) || (hour == 20 && minute == 0); // Phase 2 PEMBESARAN
-  else if (phase == 3) return (hour == 8 && minute == 0) || (hour == 16 && minute == 0) || (hour == 20 && minute == 0); // Phase 3 PEMATANGAN
+  if (phase == 0)      return (hour == 22 && minute == 45) || (hour == 12 && minute == 0) || (hour == 17 && minute == 34); // Phase 0 AWAL, penyiraman phase 0 itu samain aja sama phase 1
+  else if (phase == 1) return (hour == 19 && minute == 14) || (hour == 15 && minute == 0) || (hour == 16 && minute == 0); // Phase 1 PEMBUNGAAN
+  else if (phase == 2) return (hour == 19 && minute == 25) || (hour == 16 && minute == 0) || (hour == 20 && minute == 0); // Phase 2 PEMBESARAN
+  else if (phase == 3) return (hour == 19 && minute == 35) || (hour == 16 && minute == 0) || (hour == 20 && minute == 0); // Phase 3 PEMATANGAN
   else return false;
 }
 
@@ -237,12 +238,13 @@ void setPhaseAndStart(int targetPhase, DateTime realNow) {
   startRealUnix = realNow.unixtime();
   baseSimUnix = realNow.unixtime();
 
+  // Hitung simStartUnix agar jam/hari simulasi pas di hari awal fase tersebut
   DateTime startOfDay(realNow.year(), realNow.month(), realNow.day(), 0, 0, 0);
   simStartUnix = startOfDay.unixtime() - ((uint32_t)(currentDayCount - 1) * 86400UL);
 
   isAutoTriggered = false;
   isOutputActive = false;
-  lastTriggeredTimeSlot = -1;
+  lastTriggeredTimeSlot = -1; // Reset pengunci slot waktu
   needUpdate = true;
 
   updateSystemOutputs();
@@ -336,6 +338,54 @@ BLYNK_WRITE(V4) { blynkManualState[3] = (param.asInt() == 1); needUpdate = true;
 BLYNK_WRITE(V5) { if (param.asInt() == 1) reqNextPhase = true; }
 BLYNK_WRITE(V6) { if (param.asInt() == 1) reqReset = true; }
 BLYNK_WRITE(V11) { blynkMainManualState = (param.asInt() == 1); needUpdate = true; }
+// --- FUNGSI PEMBANTU UNTUK INPUT HARI KUSTOM VIA BLYNK ---
+void setPhaseAndStartCustomDay(int targetPhase, int customDay, DateTime realNow) {
+  isSystemRunning = true;
+  currentFase = targetPhase;
+  currentDayCount = customDay;
+
+  startRealUnix = realNow.unixtime();
+  baseSimUnix = realNow.unixtime();
+
+  // Hitung simStartUnix agar jam/hari simulasi pas di hari kustom
+  DateTime startOfDay(realNow.year(), realNow.month(), realNow.day(), 0, 0, 0);
+  simStartUnix = startOfDay.unixtime() - ((uint32_t)(currentDayCount - 1) * 86400UL);
+
+  isAutoTriggered = false;
+  isOutputActive = false;
+  lastTriggeredTimeSlot = -1; // Reset pengunci slot waktu agar penyiraman fase baru bisa terpicu
+  needUpdate = true;
+
+  updateSystemOutputs();
+  saveSystemState();
+}
+
+// --- HANDLER INPUT HARI VIRTUAL PIN V12 ---
+BLYNK_WRITE(V12) {
+  int inputDay = param.asInt();
+
+  // Validasi input: Batas 1 - 75 Hari
+  if (inputDay < 1 || inputDay > 75) {
+    Serial.printf("[BLYNK INPUT] Hari %d tidak valid! Reset ke Hari 1.\n", inputDay);
+    inputDay = 1;
+    Blynk.virtualWrite(V12, 1); // Kembalikan widget Blynk ke angka 1
+  }
+
+  DateTime realNow = rtc.now();
+
+  // Tentukan Fase Otomatis Berdasarkan Hari Kustom
+  int targetFase = 0;
+  if (inputDay <= 10)      targetFase = 0;
+  else if (inputDay <= 30) targetFase = 1;
+  else if (inputDay <= 60) targetFase = 2;
+  else if (inputDay <= 75) targetFase = 3;
+
+  // Eksekusi perubahan hari & penyesuaian waktu simulasi
+  setPhaseAndStartCustomDay(targetFase, inputDay, realNow);
+
+  Serial.printf("[BLYNK INPUT] Hari berhasil diubah ke: %d | Fase: %d\n", currentDayCount, currentFase);
+}
+
 
 // LOGIKA UTAMA PERANGKAT (FREERTOS TASK)
 void appLoop() {
@@ -349,18 +399,28 @@ void appLoop() {
 
   DateTime simNow;
   if (isSystemRunning) {
+    // 1. Hitung detik simulasi (simUnix) terlebih dahulu
     uint32_t elapsedRealSeconds = realNow.unixtime() - startRealUnix;
     uint32_t addedSimSeconds = elapsedRealSeconds * SIMULATION_SPEED;
     uint32_t simUnix = baseSimUnix + addedSimSeconds;
     simNow = DateTime(simUnix);
 
+    // 2. Hitung jumlah hari berlalu berdasarkan simUnix
     uint32_t totalSimSecondsPassed = simUnix - simStartUnix;
-    int calculatedDay = (totalSimSecondsPassed / 86400UL) + 1;
+    currentDayCount = (totalSimSecondsPassed / 86400UL) + 1;
 
-    if (calculatedDay != currentDayCount) {
-      currentDayCount = calculatedDay;
+    // 3. Sinkronisasi Fase berdasarkan Hari Ke-
+    int calculatedFase = currentFase;
+    if (currentDayCount <= 10)      calculatedFase = 0;
+    else if (currentDayCount <= 30) calculatedFase = 1;
+    else if (currentDayCount <= 60) calculatedFase = 2;
+    else if (currentDayCount <= 75) calculatedFase = 3;
+    else {
+      isSystemRunning = false;
       saveSystemState();
     }
+
+    currentFase = calculatedFase;
   } else {
     simNow = realNow;
   }
