@@ -219,10 +219,10 @@ void triggerAllActuators(bool turnOn) {
 
 // --- PEMERIKSAAN JADWAL (JAM DAN MENIT SPESIFIK) ---
 bool checkPhaseSchedule(int phase, int hour, int minute) {
-  if (phase == 0)      return (hour == 22 && minute == 45) || (hour == 12 && minute == 0) || (hour == 17 && minute == 34); // Phase 0 AWAL, penyiraman phase 0 itu samain aja sama phase 1
-  else if (phase == 1) return (hour == 19 && minute == 14) || (hour == 15 && minute == 0) || (hour == 16 && minute == 0); // Phase 1 PEMBUNGAAN
-  else if (phase == 2) return (hour == 19 && minute == 25) || (hour == 16 && minute == 0) || (hour == 20 && minute == 0); // Phase 2 PEMBESARAN
-  else if (phase == 3) return (hour == 19 && minute == 35) || (hour == 16 && minute == 0) || (hour == 20 && minute == 0); // Phase 3 PEMATANGAN
+  if (phase == 0)      return (hour == 8 && minute == 30) || (hour == 15 && minute == 0) || (hour == 20 && minute == 30); // Phase 0 AWAL, penyiraman phase 0 itu samain aja sama phase 1
+  else if (phase == 1) return (hour == 8 && minute == 30) || (hour == 15 && minute == 0) || (hour == 20 && minute == 30); // Phase 1 PEMBUNGAAN
+  else if (phase == 2) return (hour == 9 && minute == 30) || (hour == 16 && minute == 0) || (hour == 21 && minute == 0 ); // Phase 2 PEMBESARAN
+  else if (phase == 3) return (hour == 9 && minute == 0) || (hour == 17 && minute == 30) || (hour == 21 && minute == 0); // Phase 3 PEMATANGAN
   else return false;
 }
 
