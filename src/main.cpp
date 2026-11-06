@@ -60,7 +60,7 @@ bool lastSelectState = LOW;
 unsigned long lastRtcUpdate = 0;
 
 unsigned long lastLcdReset = 0;
-const unsigned long LCD_RESET_INTERVAL = 10000; // timer mereset lcd agar tidak hang
+const unsigned long LCD_RESET_INTERVAL = 15000;
 const unsigned long LCD_MIN_REFRESH_INTERVAL = 150;
 
 const int relayPins[4]  = {15, 16, 17, 18};
@@ -205,22 +205,16 @@ void updateBuzzerPattern(unsigned long currentMillis) {
   }
 }
 
-// sepertinya disini problemnya (*1)
 void updateSystemOutputs() {
   bool shouldOutputsBeOn = isOutputActive || isAnyManualActive() || isMainManualActive;
   digitalWrite(RELAY_PIN, shouldOutputsBeOn ? LOW : HIGH);
-
-   for (int i = 0; i < 4; i++) {
-    bool valveOn = isOutputActive || isMainManualActive || isWatering[i];
-    digitalWrite(relayPins[i], valveOn ? LOW : HIGH);
-  }
 }
 
 void triggerAllActuators(bool turnOn) {
-  for (int i = 0; i < 4; i++){
+  for (int i = 0; i < 4; i++) {
     isWatering[i] = false;
+    digitalWrite(relayPins[i], turnOn ? LOW : HIGH);
   }
-    updateSystemOutputs();
 }
 
 // --- PEMERIKSAAN JADWAL (JAM DAN MENIT SPESIFIK) ---
@@ -440,10 +434,11 @@ void appLoop() {
       bool shouldBeWatering = (currentBtnState == HIGH) || blynkManualState[i];
 
       if (isWatering[i] != shouldBeWatering) {
-      isWatering[i] = shouldBeWatering;
-      updateSystemOutputs();
-      needUpdate = true;
-    }
+        isWatering[i] = shouldBeWatering;
+        digitalWrite(relayPins[i], isWatering[i] ? LOW : HIGH);
+        updateSystemOutputs();
+        needUpdate = true;
+      }
     }
   }
 
