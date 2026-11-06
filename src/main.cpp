@@ -1,5 +1,7 @@
 // =====================================================================
 //  Penyiraman Otomatis ESP32-S3 + WiFiManager + Blynk + Continuous Log
+//  + Safety Manual: maksimal 3 valve manual bersamaan (<4)
+//  + Mode otomatis: HANYA pompa yang nyala, valve tidak dialiri arus
 // =====================================================================
 
 #define BLYNK_TEMPLATE_ID "TMPL6AgsBMKHP"
@@ -86,6 +88,11 @@ volatile bool blynkMainManualState = false;
 volatile bool reqNextPhase = false;
 volatile bool reqReset = false;
 
+// --- SAFETY MANUAL ---
+// Valve manual yang boleh nyala bersamaan harus < 4 (maksimal 3).
+const int MAX_MANUAL_VALVES = 3;
+volatile bool manualSafetyTrip = false; // latch: reset setelah semua tombol valve manual dilepas
+
 portMUX_TYPE statusMux = portMUX_INITIALIZER_UNLOCKED;
 char stFase[16]   = "STANDBY";
 char stHari[8]    = "-";
@@ -117,6 +124,11 @@ bool isAnyManualActive() {
   return false;
 }
 
+// Pompa aktif jika: jadwal otomatis, atau manual (selama tidak safety trip)
+bool isPumpActive() {
+  return isOutputActive || (!manualSafetyTrip && (isAnyManualActive() || isMainManualActive));
+}
+
 // --- FUNGSI LOG SERIAL MONITOR DENGAN FORMAT AMAN ---
 void printSystemLog() {
   Serial.println("\n==================================================");
@@ -142,6 +154,12 @@ void printSystemLog() {
   Serial.printf(" > Waktu / Durasi  : %s\n", stWaktu);
   Serial.printf(" > Manual 1..4     : [%d, %d, %d, %d]\n", isWatering[0], isWatering[1], isWatering[2], isWatering[3]);
   Serial.printf(" > Main Manual     : %s\n", isMainManualActive ? "AKTIF" : "NONAKTIF");
+  Serial.printf(" > Safety Trip     : %s\n", manualSafetyTrip ? "TRIP (lepas semua tombol valve)" : "OK");
+  Serial.printf(" > Auto Trigger    : %d | OutputActive: %d\n", isAutoTriggered, isOutputActive);
+  Serial.printf(" > Relay Pompa     : %d (0 = NYALA)\n", digitalRead(RELAY_PIN));
+  Serial.printf(" > Relay Valve 1..4: [%d, %d, %d, %d] (0 = NYALA)\n",
+                digitalRead(relayPins[0]), digitalRead(relayPins[1]),
+                digitalRead(relayPins[2]), digitalRead(relayPins[3]));
   Serial.println("==================================================");
 }
 
@@ -185,7 +203,7 @@ void loadSystemState() {
 }
 
 void updateBuzzerPattern(unsigned long currentMillis) {
-  if (isOutputActive || isAnyManualActive() || isMainManualActive) {
+  if (isPumpActive()) {
     if (buzzerState) {
       if (currentMillis - lastBuzzerToggle >= BUZZER_ON_TIME) {
         buzzerState = false;
@@ -201,20 +219,29 @@ void updateBuzzerPattern(unsigned long currentMillis) {
     }
   } else {
     digitalWrite(BUZZER_PIN, LOW);
-    buzzerState = false; 
+    buzzerState = false;
   }
 }
 
+// SATU-SATUNYA tempat menulis ke relay (active-LOW: LOW = nyala, HIGH = mati)
+// Pompa : nyala saat otomatis ATAU manual
+// Valve : nyala HANYA saat manual (isWatering). Saat otomatis valve TIDAK dialiri arus.
 void updateSystemOutputs() {
-  bool shouldOutputsBeOn = isOutputActive || isAnyManualActive() || isMainManualActive;
-  digitalWrite(RELAY_PIN, shouldOutputsBeOn ? LOW : HIGH);
+  digitalWrite(RELAY_PIN, isPumpActive() ? LOW : HIGH);
+
+  for (int i = 0; i < 4; i++) {
+    bool valveOn = isWatering[i];
+    digitalWrite(relayPins[i], valveOn ? LOW : HIGH);
+  }
 }
 
+// Dipanggil saat otomatis mulai/selesai dan saat reset: pastikan semua valve manual mati.
+// Pompa mengikuti isOutputActive lewat updateSystemOutputs().
 void triggerAllActuators(bool turnOn) {
   for (int i = 0; i < 4; i++) {
     isWatering[i] = false;
-    digitalWrite(relayPins[i], turnOn ? LOW : HIGH);
   }
+  updateSystemOutputs();
 }
 
 // --- PEMERIKSAAN JADWAL (JAM DAN MENIT SPESIFIK) ---
@@ -267,7 +294,6 @@ void resetToStandby() {
   isAutoTriggered = false;
   isOutputActive = false;
   lastTriggeredTimeSlot = -1;
-  updateSystemOutputs();
   triggerAllActuators(false);
   needUpdate = true;
   saveSystemState();
@@ -338,6 +364,7 @@ BLYNK_WRITE(V4) { blynkManualState[3] = (param.asInt() == 1); needUpdate = true;
 BLYNK_WRITE(V5) { if (param.asInt() == 1) reqNextPhase = true; }
 BLYNK_WRITE(V6) { if (param.asInt() == 1) reqReset = true; }
 BLYNK_WRITE(V11) { blynkMainManualState = (param.asInt() == 1); needUpdate = true; }
+
 // --- FUNGSI PEMBANTU UNTUK INPUT HARI KUSTOM VIA BLYNK ---
 void setPhaseAndStartCustomDay(int targetPhase, int customDay, DateTime realNow) {
   isSystemRunning = true;
@@ -427,18 +454,43 @@ void appLoop() {
 
   checkSerialSpeedInput(realNow, simNow);
 
-  // --- MANUAL OVERRIDE (Aktif jika TIDAK sedang siram otomatis) ---
+  // --- MANUAL OVERRIDE + SAFETY (Aktif jika TIDAK sedang siram otomatis) ---
   if (!isAutoTriggered) {
+    bool req[4];
+    int reqCount = 0;
     for (int i = 0; i < 4; i++) {
-      bool currentBtnState = digitalRead(buttonPins[i]);
-      bool shouldBeWatering = (currentBtnState == HIGH) || blynkManualState[i];
+      req[i] = (digitalRead(buttonPins[i]) == HIGH) || blynkManualState[i];
+      if (req[i]) reqCount++;
+    }
 
-      if (isWatering[i] != shouldBeWatering) {
-        isWatering[i] = shouldBeWatering;
-        digitalWrite(relayPins[i], isWatering[i] ? LOW : HIGH);
-        updateSystemOutputs();
-        needUpdate = true;
+    // Safety: valve manual nyala bersamaan harus < 4
+    if (reqCount > MAX_MANUAL_VALVES) {
+      if (!manualSafetyTrip) {
+        manualSafetyTrip = true;
+        Serial.println("[SAFETY] Semua valve manual dinyalakan! Pompa & valve dimatikan.");
       }
+    } else if (reqCount == 0) {
+      if (manualSafetyTrip) {
+        manualSafetyTrip = false;
+        Serial.println("[SAFETY] Tombol valve dilepas, safety trip direset.");
+      }
+    }
+
+    bool changed = false;
+    for (int i = 0; i < 4; i++) {
+      bool newState = manualSafetyTrip ? false : req[i];
+      if (isWatering[i] != newState) {
+        isWatering[i] = newState;
+        changed = true;
+      }
+    }
+
+    // Update relay jika ada perubahan, atau jika trip baru aktif (pompa main manual ikut mati)
+    static bool lastTripApplied = false;
+    if (changed || lastTripApplied != manualSafetyTrip) {
+      lastTripApplied = manualSafetyTrip;
+      updateSystemOutputs();
+      needUpdate = true;
     }
   }
 
@@ -490,7 +542,6 @@ void appLoop() {
       Serial.println("[JADWAL] Penyiraman Otomatis Selesai!");
       isAutoTriggered = false;
       isOutputActive = false;
-      updateSystemOutputs();
       triggerAllActuators(false);
       needUpdate = true;
     }
@@ -501,13 +552,13 @@ void appLoop() {
     bool isScheduleMatch = checkPhaseSchedule(currentFase, simNow.hour(), simNow.minute());
 
     if (isScheduleMatch && (currentTimeSlot != lastTriggeredTimeSlot)) {
-      Serial.printf("[JADWAL] Pemicu Otomatis Aktif di Jam %02d:%02d!\n", simNow.hour(), simNow.minute());
+      Serial.printf("[JADWAL] Pemicu Otomatis Aktif di Jam %02d:%02d! (hanya pompa, valve mati)\n", simNow.hour(), simNow.minute());
       isAutoTriggered = true;
       isOutputActive = true;
       autoStartSimUnix = simNow.unixtime();
       lastTriggeredTimeSlot = currentTimeSlot;
 
-      updateSystemOutputs();
+      // Matikan semua valve manual, pompa nyala lewat isOutputActive
       triggerAllActuators(true);
       needUpdate = true;
     }
@@ -553,8 +604,11 @@ void updateDisplay(unsigned long currentMillis, DateTime simNow) {
   lcd.print(line2Buf);
 
   lcd.setCursor(0, 2);
-  bool isSystemActive = isOutputActive || isAnyManualActive() || isMainManualActive;
-  lcd.print(isSystemActive ? "STATUS : Pompa Aktif" : "STATUS  : STANDBY   ");
+  bool isSystemActive = isPumpActive();
+  bool isTripShown = manualSafetyTrip && !isAutoTriggered;
+  if (isTripShown)         lcd.print("STATUS : SAFETY TRIP");
+  else if (isSystemActive) lcd.print("STATUS : Pompa Aktif");
+  else                     lcd.print("STATUS  : STANDBY   ");
 
   lcd.setCursor(0, 3);
   char line4Buf[21];
@@ -594,7 +648,8 @@ void updateDisplay(unsigned long currentMillis, DateTime simNow) {
     snprintf(waktuBuf, sizeof(waktuBuf), "%02d:%02d:%02d", simNow.hour(), simNow.minute(), simNow.second());
   }
 
-  publishStatus(faseStr, hariBuf, isSystemActive ? "Keran Aktif" : "STANDBY", waktuBuf);
+  const char* statusStr = isTripShown ? "SAFETY TRIP" : (isSystemActive ? "Keran Aktif" : "STANDBY");
+  publishStatus(faseStr, hariBuf, statusStr, waktuBuf);
 }
 
 void setup() {
@@ -648,13 +703,13 @@ void setup() {
   lcd.setCursor(0, 0);
   lcd.print("Konek WiFi & Blynk..");
 
-  WiFi.disconnect(true, true); 
+  WiFi.disconnect(true, true);
   delay(200);
   WiFi.setSleep(false);
 
   WiFiManager wm;
   wm.setAPStaticIPConfig(IPAddress(192,168,4,1), IPAddress(192,168,4,1), IPAddress(255,255,255,0));
-  
+
   DNSServer dnsServer;
   wm.setAPCallback([&dnsServer](WiFiManager *myWiFiManager) {
     dnsServer.start(53, "*", IPAddress(192, 168, 4, 1));
