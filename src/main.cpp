@@ -1,7 +1,9 @@
 // =====================================================================
 //  Penyiraman Otomatis ESP32-S3 + WiFiManager + Blynk + Continuous Log
-//  + Safety Manual: maksimal 3 valve manual bersamaan (<4)
-//  + Mode otomatis: HANYA pompa yang nyala, valve tidak dialiri arus
+//  - Jadwal PER FASE (fungsi checkPhaseSchedule), jalan dengan/tanpa WiFi
+//  - Otomatis: HANYA pompa nyala, valve tidak dialiri arus
+//  - Safety manual: maksimal 3 valve manual bersamaan (<4)
+//  - Set jam RTC manual via Serial: ketik j1835 (18:35)
 // =====================================================================
 
 #define BLYNK_TEMPLATE_ID "TMPL6AgsBMKHP"
@@ -34,6 +36,9 @@ BlynkTimer timer;
 #define BTN_MANUAL_MAIN_PIN 21
 #define RELAY_PIN 8
 #define BUZZER_PIN 42
+
+// Timeout portal AP WiFiManager (detik)
+#define PORTAL_TIMEOUT_SEC 30
 
 char auth[] = BLYNK_AUTH_TOKEN;
 
@@ -70,9 +75,8 @@ const int buttonPins[6] = {10, 11, 12, 13, 38, 39};
 
 const unsigned long durasiOtomatisDetik = 480; // 8 Menit
 
-unsigned long autoStartSimUnix = 0;
+uint32_t autoStartSimUnix = 0;
 bool isAutoTriggered = false;
-int lastTriggeredDay = -1;
 int lastTriggeredTimeSlot = -1;
 
 unsigned long lastBuzzerToggle = 0;
@@ -89,9 +93,8 @@ volatile bool reqNextPhase = false;
 volatile bool reqReset = false;
 
 // --- SAFETY MANUAL ---
-// Valve manual yang boleh nyala bersamaan harus < 4 (maksimal 3).
 const int MAX_MANUAL_VALVES = 3;
-volatile bool manualSafetyTrip = false; // latch: reset setelah semua tombol valve manual dilepas
+volatile bool manualSafetyTrip = false;
 
 portMUX_TYPE statusMux = portMUX_INITIALIZER_UNLOCKED;
 char stFase[16]   = "STANDBY";
@@ -102,6 +105,10 @@ char stWaktu[12]  = "--:--:--";
 bool ntpConfigured = false;
 bool ntpSynced = false;
 unsigned long lastNtpAttempt = 0;
+
+// Jam yang dipakai penjadwal (untuk log)
+volatile int dbgHour = 0;
+volatile int dbgMinute = 0;
 
 // FORWARD DECLARATIONS
 void updateDisplay(unsigned long currentMillis, DateTime simNow);
@@ -116,6 +123,7 @@ void printSystemLog();
 void appLoop();
 void appTask(void* pv);
 void setPhaseAndStartCustomDay(int targetPhase, int customDay, DateTime realNow);
+void rebaseSimToRtc(DateTime now);
 
 bool isAnyManualActive() {
   for (int i = 0; i < 4; i++) {
@@ -129,7 +137,7 @@ bool isPumpActive() {
   return isOutputActive || (!manualSafetyTrip && (isAnyManualActive() || isMainManualActive));
 }
 
-// --- FUNGSI LOG SERIAL MONITOR DENGAN FORMAT AMAN ---
+// --- FUNGSI LOG SERIAL MONITOR ---
 void printSystemLog() {
   Serial.println("\n==================================================");
   Serial.println("[STATUS SYSTEM LOG - 1s LOOP]");
@@ -142,7 +150,7 @@ void printSystemLog() {
     Serial.print(WiFi.softAPIP());
     Serial.println(" [Connect to Setup-Melon-IoT]");
   } else {
-    Serial.println(" > WiFi Status    : CONNECTING / INITIALIZING");
+    Serial.println(" > WiFi Status    : OFFLINE (jadwal tetap jalan)");
     Serial.println(" > IP Address      : 0.0.0.0");
   }
 
@@ -152,6 +160,7 @@ void printSystemLog() {
   Serial.printf(" > Hari Ke         : %s\n", stHari);
   Serial.printf(" > Status Pompa    : %s\n", stStatus);
   Serial.printf(" > Waktu / Durasi  : %s\n", stWaktu);
+  Serial.printf(" > Jam Penjadwal   : %02d:%02d (fase %d) | NTP: %s\n", dbgHour, dbgMinute, currentFase, ntpSynced ? "SINKRON" : "BELUM");
   Serial.printf(" > Manual 1..4     : [%d, %d, %d, %d]\n", isWatering[0], isWatering[1], isWatering[2], isWatering[3]);
   Serial.printf(" > Main Manual     : %s\n", isMainManualActive ? "AKTIF" : "NONAKTIF");
   Serial.printf(" > Safety Trip     : %s\n", manualSafetyTrip ? "TRIP (lepas semua tombol valve)" : "OK");
@@ -225,18 +234,16 @@ void updateBuzzerPattern(unsigned long currentMillis) {
 
 // SATU-SATUNYA tempat menulis ke relay (active-LOW: LOW = nyala, HIGH = mati)
 // Pompa : nyala saat otomatis ATAU manual
-// Valve : nyala HANYA saat manual (isWatering). Saat otomatis valve TIDAK dialiri arus.
+// Valve : nyala HANYA saat manual (isWatering)
 void updateSystemOutputs() {
   digitalWrite(RELAY_PIN, isPumpActive() ? LOW : HIGH);
 
   for (int i = 0; i < 4; i++) {
-    bool valveOn = isWatering[i];
-    digitalWrite(relayPins[i], valveOn ? LOW : HIGH);
+    digitalWrite(relayPins[i], isWatering[i] ? LOW : HIGH);
   }
 }
 
-// Dipanggil saat otomatis mulai/selesai dan saat reset: pastikan semua valve manual mati.
-// Pompa mengikuti isOutputActive lewat updateSystemOutputs().
+// Pastikan semua valve manual mati, lalu terapkan ke relay.
 void triggerAllActuators(bool turnOn) {
   for (int i = 0; i < 4; i++) {
     isWatering[i] = false;
@@ -245,12 +252,41 @@ void triggerAllActuators(bool turnOn) {
 }
 
 // --- PEMERIKSAAN JADWAL (JAM DAN MENIT SPESIFIK) ---
+// Ubah jam penyiraman langsung di baris fase masing-masing.
+// Contoh 06:40 -> (hour == 6 && minute == 40)
 bool checkPhaseSchedule(int phase, int hour, int minute) {
-  if (phase == 0)      return (hour == 8 && minute == 30) || (hour == 15 && minute == 0) || (hour == 20 && minute == 30); // Phase 0 AWAL, penyiraman phase 0 itu samain aja sama phase 1
-  else if (phase == 1) return (hour == 8 && minute == 30) || (hour == 15 && minute == 0) || (hour == 20 && minute == 30); // Phase 1 PEMBUNGAAN
-  else if (phase == 2) return (hour == 9 && minute == 30) || (hour == 16 && minute == 0) || (hour == 21 && minute == 0 ); // Phase 2 PEMBESARAN
-  else if (phase == 3) return (hour == 9 && minute == 0) || (hour == 17 && minute == 30) || (hour == 21 && minute == 0); // Phase 3 PEMATANGAN
-  else return false;
+  if (phase == 0) {         // Fase 0 AWAL (sama dengan fase 1), dipakai juga saat STANDBY
+    return (hour == 7 && minute == 16) ||
+           (hour == 15 && minute == 0)  ||
+           (hour == 20 && minute == 30);
+  }
+  else if (phase == 1) {    // Fase 1 PEMBUNGAAN
+    return (hour == 7  && minute == 16) ||
+           (hour == 15 && minute == 0)  ||
+           (hour == 20 && minute == 30);
+  }
+  else if (phase == 2) {    // Fase 2 PEMBESARAN
+    return (hour == 9  && minute == 30) ||
+           (hour == 16 && minute == 0)  ||
+           (hour == 21 && minute == 0);
+  }
+  else if (phase == 3) {    // Fase 3 PEMATANGAN
+    return (hour == 9  && minute == 0)  ||
+           (hour == 17 && minute == 30) ||
+           (hour == 21 && minute == 0);
+  }
+  else {
+    return false;
+  }
+}
+
+// Selaraskan hitungan simulasi ke jam RTC sekarang, nomor hari tetap.
+// Dipakai saat RTC direset / diatur ulang ketika sistem RUNNING.
+void rebaseSimToRtc(DateTime now) {
+  uint32_t secOfDay = (uint32_t)now.hour() * 3600UL + (uint32_t)now.minute() * 60UL + now.second();
+  startRealUnix = now.unixtime();
+  baseSimUnix = simStartUnix + (uint32_t)(currentDayCount - 1) * 86400UL + secOfDay;
+  saveSystemState();
 }
 
 void setPhaseAndStart(int targetPhase, DateTime realNow) {
@@ -271,7 +307,7 @@ void setPhaseAndStart(int targetPhase, DateTime realNow) {
 
   isAutoTriggered = false;
   isOutputActive = false;
-  lastTriggeredTimeSlot = -1; // Reset pengunci slot waktu
+  lastTriggeredTimeSlot = -1;
   needUpdate = true;
 
   updateSystemOutputs();
@@ -299,8 +335,29 @@ void resetToStandby() {
   saveSystemState();
 }
 
+// Serial:
+//   j1835  -> set jam RTC ke 18:35 (tanggal tetap)
+//   angka  -> kecepatan simulasi (mis. 10 untuk 10x)
 void checkSerialSpeedInput(DateTime realNow, DateTime &simNow) {
   if (Serial.available() > 0) {
+    char c = Serial.peek();
+
+    if (c == 'j' || c == 'J') {
+      Serial.read();
+      int hhmm = Serial.parseInt();
+      int h = hhmm / 100, m = hhmm % 100;
+      if (h >= 0 && h < 24 && m >= 0 && m < 60) {
+        DateTime n = rtc.now();
+        rtc.adjust(DateTime(n.year(), n.month(), n.day(), h, m, 0));
+        if (isSystemRunning) rebaseSimToRtc(rtc.now());
+        lastTriggeredTimeSlot = -1;
+        Serial.printf("-> Jam RTC diatur ke %02d:%02d\n", h, m);
+      } else {
+        Serial.println("-> Format salah. Contoh: j1840");
+      }
+      return;
+    }
+
     int val = Serial.parseInt();
     if (val > 0) {
       if (isSystemRunning) {
@@ -316,6 +373,7 @@ void checkSerialSpeedInput(DateTime realNow, DateTime &simNow) {
   }
 }
 
+// Sinkron NTP hanya BONUS kalau ada WiFi. Jadwal tidak bergantung padanya.
 void syncNtpIfNeeded() {
   if (ntpSynced || WiFi.status() != WL_CONNECTED) return;
 
@@ -333,6 +391,7 @@ void syncNtpIfNeeded() {
     rtc.adjust(DateTime(timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
                         timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec));
     ntpSynced = true;
+    if (isSystemRunning) rebaseSimToRtc(rtc.now());
     Serial.println("[NTP] RTC Berhasil Disinkronkan!");
   }
 }
@@ -374,13 +433,12 @@ void setPhaseAndStartCustomDay(int targetPhase, int customDay, DateTime realNow)
   startRealUnix = realNow.unixtime();
   baseSimUnix = realNow.unixtime();
 
-  // Hitung simStartUnix agar jam/hari simulasi pas di hari kustom
   DateTime startOfDay(realNow.year(), realNow.month(), realNow.day(), 0, 0, 0);
   simStartUnix = startOfDay.unixtime() - ((uint32_t)(currentDayCount - 1) * 86400UL);
 
   isAutoTriggered = false;
   isOutputActive = false;
-  lastTriggeredTimeSlot = -1; // Reset pengunci slot waktu agar penyiraman fase baru bisa terpicu
+  lastTriggeredTimeSlot = -1;
   needUpdate = true;
 
   updateSystemOutputs();
@@ -391,23 +449,20 @@ void setPhaseAndStartCustomDay(int targetPhase, int customDay, DateTime realNow)
 BLYNK_WRITE(V12) {
   int inputDay = param.asInt();
 
-  // Validasi input: Batas 1 - 75 Hari
   if (inputDay < 1 || inputDay > 75) {
     Serial.printf("[BLYNK INPUT] Hari %d tidak valid! Reset ke Hari 1.\n", inputDay);
     inputDay = 1;
-    Blynk.virtualWrite(V12, 1); // Kembalikan widget Blynk ke angka 1
+    Blynk.virtualWrite(V12, 1);
   }
 
   DateTime realNow = rtc.now();
 
-  // Tentukan Fase Otomatis Berdasarkan Hari Kustom
   int targetFase = 0;
   if (inputDay <= 10)      targetFase = 0;
   else if (inputDay <= 30) targetFase = 1;
   else if (inputDay <= 60) targetFase = 2;
   else if (inputDay <= 75) targetFase = 3;
 
-  // Eksekusi perubahan hari & penyesuaian waktu simulasi
   setPhaseAndStartCustomDay(targetFase, inputDay, realNow);
 
   Serial.printf("[BLYNK INPUT] Hari berhasil diubah ke: %d | Fase: %d\n", currentDayCount, currentFase);
@@ -426,17 +481,20 @@ void appLoop() {
 
   DateTime simNow;
   if (isSystemRunning) {
-    // 1. Hitung detik simulasi (simUnix) terlebih dahulu
+    // Pengaman: RTC lebih "muda" dari waktu mulai tersimpan (RTC reset) -> rebase
+    if (realNow.unixtime() < startRealUnix) {
+      Serial.println("[RTC] Jam RTC lebih lama dari data tersimpan (RTC reset?). Rebase simulasi ke jam RTC.");
+      rebaseSimToRtc(realNow);
+    }
+
     uint32_t elapsedRealSeconds = realNow.unixtime() - startRealUnix;
     uint32_t addedSimSeconds = elapsedRealSeconds * SIMULATION_SPEED;
     uint32_t simUnix = baseSimUnix + addedSimSeconds;
     simNow = DateTime(simUnix);
 
-    // 2. Hitung jumlah hari berlalu berdasarkan simUnix
     uint32_t totalSimSecondsPassed = simUnix - simStartUnix;
     currentDayCount = (totalSimSecondsPassed / 86400UL) + 1;
 
-    // 3. Sinkronisasi Fase berdasarkan Hari Ke-
     int calculatedFase = currentFase;
     if (currentDayCount <= 10)      calculatedFase = 0;
     else if (currentDayCount <= 30) calculatedFase = 1;
@@ -452,9 +510,12 @@ void appLoop() {
     simNow = realNow;
   }
 
+  dbgHour = simNow.hour();
+  dbgMinute = simNow.minute();
+
   checkSerialSpeedInput(realNow, simNow);
 
-  // --- MANUAL OVERRIDE + SAFETY (Aktif jika TIDAK sedang siram otomatis) ---
+  // --- MANUAL OVERRIDE + SAFETY (aktif jika TIDAK sedang siram otomatis) ---
   if (!isAutoTriggered) {
     bool req[4];
     int reqCount = 0;
@@ -463,7 +524,6 @@ void appLoop() {
       if (req[i]) reqCount++;
     }
 
-    // Safety: valve manual nyala bersamaan harus < 4
     if (reqCount > MAX_MANUAL_VALVES) {
       if (!manualSafetyTrip) {
         manualSafetyTrip = true;
@@ -485,7 +545,6 @@ void appLoop() {
       }
     }
 
-    // Update relay jika ada perubahan, atau jika trip baru aktif (pompa main manual ikut mati)
     static bool lastTripApplied = false;
     if (changed || lastTripApplied != manualSafetyTrip) {
       lastTripApplied = manualSafetyTrip;
@@ -533,9 +592,8 @@ void appLoop() {
     }
   }
 
-  // --- LOGIKA PENJADWALAN OTOMATIS (JALAN DI MODE RUNNING MAUPUN STANDBY) ---
+  // --- PENJADWALAN OTOMATIS PER FASE (RUNNING MAUPUN STANDBY, TANPA SYARAT WIFI) ---
   if (isAutoTriggered) {
-    // 1. Hitung Mundur Durasi Penyiraman Otomatis (480 Detik)
     uint32_t simSecondsPassed = simNow.unixtime() - autoStartSimUnix;
 
     if (simSecondsPassed >= durasiOtomatisDetik) {
@@ -547,20 +605,24 @@ void appLoop() {
     }
   }
   else {
-    // 2. Cek Kesesuaian Jam dan Menit
     int currentTimeSlot = (simNow.hour() * 100) + simNow.minute();
     bool isScheduleMatch = checkPhaseSchedule(currentFase, simNow.hour(), simNow.minute());
 
-    if (isScheduleMatch && (currentTimeSlot != lastTriggeredTimeSlot)) {
-      Serial.printf("[JADWAL] Pemicu Otomatis Aktif di Jam %02d:%02d! (hanya pompa, valve mati)\n", simNow.hour(), simNow.minute());
-      isAutoTriggered = true;
-      isOutputActive = true;
-      autoStartSimUnix = simNow.unixtime();
-      lastTriggeredTimeSlot = currentTimeSlot;
+    if (isScheduleMatch) {
+      if (currentTimeSlot != lastTriggeredTimeSlot) {
+        Serial.printf("[JADWAL] POMPA NYALA di jam %02d:%02d fase %d (hanya pompa, valve mati)\n",
+                      simNow.hour(), simNow.minute(), currentFase);
+        isAutoTriggered = true;
+        isOutputActive = true;
+        autoStartSimUnix = simNow.unixtime();
+        lastTriggeredTimeSlot = currentTimeSlot;
 
-      // Matikan semua valve manual, pompa nyala lewat isOutputActive
-      triggerAllActuators(true);
-      needUpdate = true;
+        triggerAllActuators(true);
+        needUpdate = true;
+      }
+    } else {
+      // Di luar menit jadwal: lepas kunci slot supaya jam yang sama bisa jalan lagi besok
+      lastTriggeredTimeSlot = -1;
     }
   }
 
@@ -687,10 +749,11 @@ void setup() {
   lcd.print("Booting Sistem...");
 
   if (!rtc.begin()) {
-    Serial.println("[ERROR] RTC DS3231 Tidak Terdeteksi! Lanjut tanpa RTC.");
+    Serial.println("[ERROR] RTC DS3231 Tidak Terdeteksi!");
   } else {
     Serial.println("[OK] RTC DS3231 Terdeteksi.");
     if (rtc.lostPower()) {
+      Serial.println("[RTC] Baterai habis / jam hilang! Atur jam: ketik j1835 di Serial, atau tunggu NTP.");
       rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
     }
   }
@@ -699,11 +762,12 @@ void setup() {
   updateSystemOutputs();
   lastLcdReset = millis();
 
-  // 5. KONEKSI WIFIMANAGER DENGAN REDIRECT CAPTIVE PORTAL
-  lcd.setCursor(0, 0);
-  lcd.print("Konek WiFi & Blynk..");
+  // 5. JALANKAN LOGIKA UTAMA (JADWAL) SEKARANG, SEBELUM WIFI,
+  //    supaya jadwal pompa jalan walau WiFi/portal belum selesai atau tidak ada.
+  xTaskCreatePinnedToCore(appTask, "appTask", 8192, NULL, 1, NULL, 1);
 
-  WiFi.disconnect(true, true);
+  // 6. KONEKSI WIFIMANAGER (tidak menyentuh LCD supaya tidak bentrok dengan appTask)
+  WiFi.disconnect(true, false); // JANGAN hapus kredensial tersimpan
   delay(200);
   WiFi.setSleep(false);
 
@@ -717,20 +781,16 @@ void setup() {
   });
 
   wm.setCaptivePortalEnable(true);
-  wm.setConfigPortalTimeout(180);
+  wm.setConfigPortalTimeout(PORTAL_TIMEOUT_SEC);
 
-  Serial.println("[WiFiManager] Reset Wi-Fi tersimpan...");
-  wm.resetSettings();
+  // wm.resetSettings(); // DIMATIKAN: aktifkan hanya kalau mau menghapus WiFi tersimpan
 
   bool res = wm.autoConnect("Setup-Melon-IoT");
 
-  // Matikan DNS Server kustom begitu portal timeout / selesai
   dnsServer.stop();
 
   if (!res) {
-    Serial.println("[WiFi] Portal Timeout / Gagal. Mode Offline!");
-    lcd.clear();
-    lcd.print("WiFi: Offline");
+    Serial.println("[WiFi] Portal Timeout / Gagal. Mode Offline! (jadwal tetap jalan)");
   } else {
     Serial.println("[WiFi] TERHUBUNG ke Router!");
     Serial.print("[WiFi] IP Address: ");
@@ -746,7 +806,6 @@ void setup() {
   }
 
   timer.setInterval(1000L, sendBlynkStatus);
-  xTaskCreatePinnedToCore(appTask, "appTask", 8192, NULL, 1, NULL, 1);
 }
 
 void loop() {
@@ -760,7 +819,7 @@ void loop() {
   timer.run();
 }
 
-// --- PEMBUNGKUS FREERTOS TASK UNTUK APPLOOP (DITARUH PALING BAWAH) ---
+// --- PEMBUNGKUS FREERTOS TASK UNTUK APPLOOP ---
 void appTask(void* pv) {
   for (;;) {
     appLoop();
